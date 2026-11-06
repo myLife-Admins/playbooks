@@ -1,13 +1,13 @@
 - name: Get current year and month
   set_fact:
-    current_year: "{{ ansible_date_time.year }}"
-    current_month: "{{ '%02d'|format(ansible_date_time.month|int) }}"
-    current_time: "{{ ansible_date_time.iso8601 }}"
+    current_year: "{{ ansible_facts['date_time']['year'] }}"
+    current_month: "{{ '%02d'|format(ansible_facts['date_time']['month']|int) }}"
+    current_time: "{{ ansible_facts['date_time']['iso8601'] }}"
   delegate_to: localhost
 
 - name: Create directories for current year and month
   file:
-    path: "/mnt/protokolle/{{ current_year }}/{{ current_month }}/Serverpatch/Fertig/Linux"
+    path: "{{ protokoll_basis }}/{{ current_year }}/{{ current_month }}/Serverpatch/Fertig/Linux"
     state: directory
   delegate_to: localhost
 
@@ -16,14 +16,9 @@
   register: update_info
   changed_when: false  # Markiere nicht als geändert, selbst wenn Updates verfügbar sind
 
-- name: Correct hostname if necessary
-  set_fact:
-    hostname_for_file: "{{ 'ansible' if inventory_hostname == 'localhost' else inventory_hostname }}"
-  delegate_to: localhost
-
 - name: Write Linux patch log
   ansible.builtin.shell: |
-    cat <<EOF >> /mnt/protokolle/{{ ansible_date_time.year }}/{{ ansible_date_time.month }}/Serverpatch/Fertig/Linux/Updates-{{ hostname_for_file }}-Generated.txt
+    cat <<EOF >> {{ protokoll_basis }}/{{ ansible_facts['date_time']['year'] }}/{{ ansible_facts['date_time']['month'] }}/Serverpatch/Fertig/Linux/Updates-{{ inventory_hostname }}-Generated.txt
     ########################################## {{ current_time }} ##########################################
     Updates:
     {{ "-" + update_info.stdout | default("No updates available.") }}

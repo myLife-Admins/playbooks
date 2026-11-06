@@ -1,38 +1,41 @@
 - name: Ensure directory exists
   ansible.builtin.file:
-    path: /mnt/protokolle/{{ ansible_date_time.year }}/{{ ansible_date_time.month }}/Serverpatch/@work
+    path: "{{ protokoll_basis }}/{{ ansible_facts['date_time']['year'] }}/{{ ansible_facts['date_time']['month'] }}/Serverpatch/@work"
     state: directory
     recurse: yes
   delegate_to: localhost
 
 - name: Ensure log file exists
   ansible.builtin.file:
-    path: /mnt/protokolle/{{ ansible_date_time.year }}/{{ ansible_date_time.month }}/Serverpatch/@work/Updates-{{ groupe_name }}-Generated.txt
+    path: "{{ protokoll_basis }}/{{ ansible_facts['date_time']['year'] }}/{{ ansible_facts['date_time']['month'] }}/Serverpatch/@work/Updates-{{ groupe_name }}-Generated.txt"
     state: touch
   delegate_to: localhost
 
-# - name: Parse the JSON output
-#   set_fact:
-#     parsed_logs: "{{ event_logs.stdout_lines | join('') | from_json }}"
-
 - name: Write log
   ansible.builtin.lineinfile:
-    path: /mnt/protokolle/{{ ansible_date_time.year }}/{{ ansible_date_time.month }}/Serverpatch/@work/Updates-{{ groupe_name }}-Generated.txt
+    path: "{{ protokoll_basis }}/{{ ansible_facts['date_time']['year'] }}/{{ ansible_facts['date_time']['month'] }}/Serverpatch/@work/Updates-{{ groupe_name }}-Generated.txt"
     line: |
       ---------------------------------------------------------------------------------------------------------------------------
 
       {{ inventory_hostname }} ({{ ansible_facts.os_name | default('unbekannt') }}):
+        Snapshot: {{ snapshot_status | default('unbekannt') }}
         Updates({{ update_result.found_update_count | default(0) }}):
-        {% for update in update_result.updates | default({}) %}
+        {%- for update in update_result.updates | default({}) %}
           - {{ update_result.updates[update].title }}
-        {% endfor %}
+        {%- endfor %}
 
         Done: Neustart von {{ reboot_start.stdout | default('unbekannt') }} bis {{ reboot_end.stdout | default('unbekannt') }} = {{ 'FEHLER' if patch_error != '' else 'OK' }}
         {{ windows_diskspace_check | default('ToDo: Festplattenspeicher = (nicht ermittelt)') }}
         {{ windows_verson_check | default('ToDo: Versionsupdate = (nicht ermittelt)') }}
-        {% if patch_error != '' %}
+        {%- if service_stop_errors | default([]) | length > 0 %}
+        ACHTUNG: Dienste liefen waehrend des Updates weiter: {{ service_stop_errors | join(', ') }}
+        {%- endif %}
+        {%- if service_start_errors | default([]) | length > 0 %}
+        ACHTUNG: Dienste konnten nicht gestartet werden: {{ service_start_errors | join(', ') }}
+        {%- endif %}
+        {%- if patch_error != '' %}
         {{ patch_error }}
-        {% endif %}
+        {%- endif %}
         ToDo: WSUS Status prüfen =
         ToDo: Logs > Anwendung und System:
         ToDo: Abmelden =

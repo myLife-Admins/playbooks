@@ -1,0 +1,23 @@
+# Vorlage - KEINE echten Zugangsdaten in diese Datei.
+#
+#     ansible-vault create inventory/host_vars/myrootca1.yml
+#
+# WARUM DIESER HOST EINEN SONDERFALL BRAUCHT
+# ------------------------------------------
+# myrootca1 steht im Inventory in zwei Gruppen: [windows_ad] und
+# [windows_notdomain]. Beide sind Kinder von [windows], also Geschwister auf
+# derselben Ebene. Legt man in beiden ein vault.yml mit unterschiedlichen
+# Zugangsdaten an, entscheidet Ansible nicht nach Bedeutung, sondern nach
+# Alphabet: bei gleichrangigen Gruppen gewinnt die zuletzt einsortierte, hier
+# also windows_notdomain. Das funktioniert zufaellig richtig, ist aber nirgends
+# so gemeint und kippt, sobald jemand eine Gruppe umbenennt.
+#
+# host_vars stehen ueber allen Gruppenvariablen. Damit ist hier explizit
+# festgelegt, was sonst nur implizit herauskaeme.
+#
+# Besser waere, die Gruppenzugehoerigkeit zu bereinigen: entweder ist die
+# Maschine domaenengebunden oder nicht. Dann kann diese Datei entfallen.
+---
+ansible_user: BENUTZER
+ansible_password: HIER_DAS_PASSWORT
+snapshot_required: false

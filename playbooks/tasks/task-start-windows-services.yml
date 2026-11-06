@@ -1,9 +1,0 @@
-- name: Start services
-  ansible.windows.win_service:
-    name: "{{ item.item }}"
-    state: started
-  loop: "{{ service_info.results }}"
-  when: 
-    - item.exists
-  no_log: true  # Verhindert die Ausgabe detaillierter Informationen
-  ignore_errors: yes

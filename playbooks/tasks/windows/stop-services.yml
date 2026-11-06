@@ -1,0 +1,19 @@
+# Ein Dienst, der sich nicht stoppen laesst, soll den Patchlauf nicht kippen -
+# er laeuft dann eben waehrend des Updates weiter. Das ist aber genau das, was
+# hier verhindert werden soll, also wird es protokolliert statt verschluckt.
+- name: Stop services
+  ansible.windows.win_service:
+    name: "{{ item.item }}"
+    state: stopped
+  loop: "{{ service_info.results | default([]) }}"
+  when:
+    - item.exists
+  register: service_stop
+  ignore_errors: yes
+
+- name: Collect services that failed to stop
+  set_fact:
+    service_stop_errors: >-
+      {{ service_stop.results | default([])
+         | selectattr('failed', 'defined') | selectattr('failed')
+         | map(attribute='item.item') | list }}

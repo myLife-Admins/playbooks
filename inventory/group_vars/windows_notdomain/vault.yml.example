@@ -1,0 +1,21 @@
+# Vorlage - KEINE echten Zugangsdaten in diese Datei.
+#
+#     ansible-vault create inventory/group_vars/windows_notdomain/vault.yml
+#
+# [windows_notdomain] ist ein Kind von [windows]. Kind-Gruppen ueberschreiben
+# Eltern-Gruppen, diese Werte gewinnen hier also gegen windows/vault.yml -
+# ohne dass am Playbook oder am Semaphore-Template etwas geaendert werden muss.
+#
+# Dasselbe Muster fuer jede weitere Gruppe mit eigenem Konto: Verzeichnis
+# inventory/group_vars/<gruppe>/ anlegen, vault.yml darin.
+---
+# Lokales Konto - kein Domaenen-Suffix.
+# Bei lokalen Konten ueber WinRM/NTLM authentifiziert der blosse Benutzername
+# gegen die lokale SAM. Falls ein Host das nicht annimmt, ist die uebliche
+# Schreibweise ".\\BENUTZER" - das beim ersten Lauf gegen einen Host pruefen.
+ansible_user: BENUTZER
+ansible_password: HIER_DAS_PASSWORT
+
+# Diese Hosts haben keine VM in vcenter1, also kein Snapshot und kein Abbruch
+# deswegen. Siehe Playbook-Kommentar bei "Fail if VM was not found".
+snapshot_required: false

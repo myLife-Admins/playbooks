@@ -1,0 +1,152 @@
+#version 2.0
+#Stand 17.09.2026
+
+# ---------------------------------------------------------------------------
+# Linux
+# ---------------------------------------------------------------------------
+
+# Der bisherige Ansible-Controller gehoert hier mit rein (unter seinem echten
+# Hostnamen) - unter Semaphore patcht er sich nicht mehr selbst via localhost.
+[linux_server]
+glpi-01
+v-ts-obsrv-01
+
+[linux_glpi]
+glpi-01
+
+[linux_server:vars]
+# SSH-Key kommt aus dem Semaphore Key Store und wird zur Laufzeit injiziert,
+# deshalb steht hier kein ansible_ssh_private_key_file mehr.
+ansible_user=ladmin
+
+# ---------------------------------------------------------------------------
+# Windows
+#
+# Alle Windows-Gruppen haengen unter [windows]. Die WinRM-Verbindungsparameter
+# stehen deshalb genau einmal in [windows:vars] statt frueher 12x pro Gruppe.
+# Neue Windows-Gruppe anlegen = Gruppe definieren + unter [windows:children]
+# eintragen, sonst fehlt ihr die Verbindungskonfiguration.
+# ---------------------------------------------------------------------------
+
+[windows:children]
+test
+windows_manage
+windows_test
+windows_entwicklung
+windows_upla
+windows_ad
+windows_pm
+windows_produktion
+windows_produktionkrit
+windows_fileserver
+windows_notdomain
+windows_debug
+
+[windows:vars]
+ansible_connection=winrm
+ansible_winrm_transport=ntlm
+ansible_port=5985
+ansible_winrm_server_cert_validation=ignore
+ansible_winrm_operation_timeout_sec=1000
+ansible_winrm_read_timeout_sec=1200
+
+# Patch-Testmaschinen (nicht zu verwechseln mit [windows_test] = Testumgebung)
+[test]
+patchtest2016
+patchtest2022
+patchtest2025
+
+[windows_manage]
+network1
+network2
+network3
+openmanage1
+protect3
+sec1
+sec2
+sim4
+sophos2
+veeam4
+wsus2
+mesh1
+lan1
+lan2
+
+[windows_test]
+dbtest5
+dbwebtest5
+fondsdoktest1
+formstest2
+trelease5
+webtest4
+wstest1
+
+[windows_entwicklung]
+dbentw5
+dbwebentw5
+formsentw
+formsentw2
+fondsdokentw1
+wsentw1
+webentw4
+webentw-ident
+
+[windows_upla]
+dbupla5
+upla-1
+upla-2
+upla-3
+upla-4
+upla-5
+upla-6
+upla-7
+upla-8
+upla-9
+upla-e
+
+[windows_ad]
+adcon1
+dc-2
+dc-3
+mysubca1
+myrootca1
+nps1
+nps2
+
+[windows_pm]
+dc-1
+
+[windows_produktion]
+acr-1
+apps2
+apps7
+print3
+print2
+fs2
+
+[windows_produktionkrit]
+cmpro1
+dbdok5
+dt1
+ws1
+wsext1
+vbs-1
+vbs-2
+vbs-4
+personal2
+ftp1
+ftp2
+
+[windows_fileserver]
+fs2
+fs5
+
+# Nicht domaenengebunden - brauchen lokale statt Domaenen-Credentials
+[windows_notdomain]
+myrootca1
+myweb1
+backup5
+backup4
+
+[windows_debug]
+upla-1

@@ -1,2 +1,11 @@
-playbooks/.vscode/
-.vscode/
+# Vault-Passwortdateien duerfen NIE ins Repo.
+.vault-pass
+.vault_pass*
+vault-password*
+
+# Entschluesselte Kopien, die beim Bearbeiten entstehen koennen
+*.yml.decrypted
+*.yml.plain
+
+# Die verschluesselten vault.yml gehoeren dagegen INS Repo - sie sind
+# verschluesselt. Deshalb hier bewusst kein Muster auf vault.yml.

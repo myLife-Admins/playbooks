@@ -1,0 +1,25 @@
+# Vorlage - KEINE echten Zugangsdaten in diese Datei.
+#
+# Die echte Datei wird verschluesselt daneben angelegt und heisst vault.yml:
+#
+#     ansible-vault create inventory/group_vars/windows/vault.yml
+#
+# Sie gilt dann fuer alle Gruppen unter [windows:children], also fuer die
+# Mehrheit der Hosts mit dem Domaenen-Admin. Abweichungen werden weiter unten
+# in der Hierarchie ueberschrieben (siehe windows_notdomain/).
+#
+# Spaeter bearbeiten mit:  ansible-vault edit inventory/group_vars/windows/vault.yml
+# Ansehen mit:             ansible-vault view inventory/group_vars/windows/vault.yml
+#
+# Die verschluesselte vault.yml gehoert ins Git - sie ist ja verschluesselt.
+# Diese .example-Datei bleibt als Dokumentation daneben liegen.
+---
+# Domaenen-Admin fuer die WinRM-Verbindung
+ansible_user: BENUTZER@gutingia.local
+ansible_password: HIER_DAS_PASSWORT
+
+# vCenter-Konto fuer die Snapshots vor dem Patchen.
+# Alternativ weiterhin aus einer Semaphore Variable Group per -e; das Playbook
+# prueft im ersten Task nur, DASS die vier Werte gesetzt sind, nicht woher.
+vm_user: BENUTZER@vsphere.local
+vm_password: HIER_DAS_PASSWORT

@@ -1,0 +1,5 @@
+- name: Get service status (Windows)
+  ansible.windows.win_service_info:
+    name: "{{ item }}"
+  register: service_info
+  loop: "{{ windows_patch_services }}"

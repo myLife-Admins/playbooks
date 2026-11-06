@@ -1,0 +1,21 @@
+# Laeuft im always-Block. ignore_errors muss hier bleiben: scheitert dieser
+# Task, wuerde Ansible den always-Block abbrechen und das Protokoll - der
+# eigentliche Zweck des ganzen Konstrukts - nie geschrieben werden.
+# Fehler werden deshalb nicht verschluckt, sondern eingesammelt und
+# anschliessend im Protokoll ausgewiesen.
+- name: Start services
+  ansible.windows.win_service:
+    name: "{{ item.item }}"
+    state: started
+  loop: "{{ service_info.results | default([]) }}"
+  when:
+    - item.exists
+  register: service_start
+  ignore_errors: yes
+
+- name: Collect services that failed to start
+  set_fact:
+    service_start_errors: >-
+      {{ service_start.results | default([])
+         | selectattr('failed', 'defined') | selectattr('failed')
+         | map(attribute='item.item') | list }}

@@ -1,0 +1,11 @@
+---
+# Basisverzeichnis der Patchprotokolle.
+# Muss im Semaphore-Container als CIFS-Share //fs5/it/Protokolle gemountet sein
+# (Volume im docker-compose), sonst schlaegt jedes Logging fehl.
+protokoll_basis: /mnt/protokolle
+
+# Ablage der Resume-Marker fuer abgebrochene Windows-Patchlaeufe.
+# Liegt bewusst auf dem Share und nicht in /tmp: der Semaphore-Container ist
+# fluechtig, ein Marker in /tmp ueberlebt weder Neustart noch Update, und das
+# Resume wuerde stillschweigend bei jedem Lauf einen neuen Snapshot ziehen.
+resume_state_dir: "{{ protokoll_basis }}/ansible-state"

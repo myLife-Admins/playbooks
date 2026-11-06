@@ -1,8 +1,0 @@
-- name: Stop services
-  ansible.windows.win_service:
-    name: "{{ item.item }}"
-    state: stopped
-  loop: "{{ service_info.results }}"
-  when: 
-    - item.exists
-  ignore_errors: yes

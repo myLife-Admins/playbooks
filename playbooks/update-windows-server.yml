@@ -1,30 +1,50 @@
 ---
+# Fehlerstrategie
+# ---------------
+# Ziel: es wird IMMER ein Protokoll geschrieben, auch wenn der Lauf scheitert.
+# Das leistet der always-Block am Ende - dafuer braucht es kein ignore_errors.
+# Frueher stand ignore_errors auf fast jedem Task; damit erreichte nie ein
+# Fehler den rescue-Block, patch_error blieb leer und das Protokoll meldete
+# "OK", obwohl das Update fehlgeschlagen war.
+#
+# Jetzt gilt:
+#   - Kritischer Pfad (Snapshot, Updates, Reboot): kein ignore_errors.
+#     Ein Fehler springt nach rescue, wird festgehalten und steht im Protokoll.
+#   - Diagnose-Tasks (Versionen, Plattenplatz): failed_when: false.
+#     Die duerfen scheitern, ohne den Patchlauf zu kippen - ihr Ergebnis wird
+#     als "(nicht ermittelt)" protokolliert.
+#   - Dienste werden im always-Block gestartet, nicht am Ende des block-Teils:
+#     sonst bleiben sie nach einem Abbruch dauerhaft gestoppt.
 - name: Patch Windows Host
   hosts: "{{ target_hosts }}"
   become: false
   gather_facts: true
+
+  # strategy: free laesst jeden Host unabhaengig durchlaufen - schnell, aber
+  # die Ausgabe mehrerer Hosts verschraenkt sich und ist kaum noch zu lesen.
+  # Ohne diese Zeile (strategy: linear, der Standard) laeuft Ansible Task fuer
+  # Task durch und gibt pro Task einen Block mit allen Hosts aus: deutlich
+  # besser nachvollziehbar, dafuer wartet nach jedem Task der schnellste Host
+  # auf den langsamsten.
   strategy: free
 
-  vars_prompt:
-  - name: ansible_user
-    prompt: "Admin (bsp. adminjs@gutingia.local)"
-    private: false
-  - name: ansible_password
-    prompt: "Passwort"
-    private: true
-  - name: vm_user
-    prompt: "Vcenter Admin (bsp. adminjs@vsphere.local)"
-    private: false
-  - name: vm_password
-    prompt: "Passwort"
-    private: true
-
-  vars:
-    vcenter_hostname: vcenter1.gutingia.local
-    datacenter_name: myLife
-
   tasks:
-  # - include_tasks: tasks/task-check-wincreds.yml
+
+  # Unter Semaphore kommen die Credentials nicht mehr aus vars_prompt:
+  # ansible_user/ansible_password haengen am Inventory (Key Store),
+  # vm_user/vm_password kommen aus einer Variable Group bzw. -e.
+  # Frueh und mit klarer Meldung abbrechen, statt spaeter im Snapshot.
+  - name: Verify required credentials are set
+    ansible.builtin.assert:
+      that:
+        - ansible_user is defined and ansible_user | length > 0
+        - ansible_password is defined and ansible_password | length > 0
+        - vm_user is defined and vm_user | length > 0
+        - vm_password is defined and vm_password | length > 0
+      fail_msg: >-
+        Zugangsdaten fehlen. ansible_user/ansible_password gehoeren an das
+        Semaphore-Inventory, vm_user/vm_password in die Variable Group.
+      quiet: true
 
   - name: Set groupname
     set_fact:
@@ -32,30 +52,35 @@
 
   - name: Get current year and month
     set_fact:
-      current_year: "{{ ansible_date_time.year }}"
-      current_month: "{{ '%02d'|format(ansible_date_time.month|int) }}"
-      current_time: "{{ ansible_date_time.iso8601 }}"
+      current_year: "{{ ansible_facts['date_time']['year'] }}"
+      current_month: "{{ '%02d'|format(ansible_facts['date_time']['month']|int) }}"
+      current_time: "{{ ansible_facts['date_time']['iso8601'] }}"
     delegate_to: localhost
 
   - name: Create directories for current year and month
     file:
-      path: "/mnt/protokolle/{{ current_year }}/{{ current_month }}"
+      path: "{{ protokoll_basis }}/{{ current_year }}/{{ current_month }}"
       state: directory
     delegate_to: localhost
-    ignore_errors: yes
 
-  # Resume-State: Auf dem Controller wird pro Host eine Datei gespeichert,
-  # damit ein fehlgeschlagener Lauf (nach Fehlerbehebung) ohne erneuten
-  # Snapshot fortgesetzt werden kann. State wird bei Erfolg automatisch gelöscht.
+  - name: Ensure resume state directory exists
+    file:
+      path: "{{ resume_state_dir }}"
+      state: directory
+    delegate_to: localhost
+
+  # Resume-State: Pro Host wird ein Marker abgelegt, damit ein
+  # fehlgeschlagener Lauf (nach Fehlerbehebung) ohne erneuten Snapshot
+  # fortgesetzt werden kann. Marker wird bei Erfolg automatisch geloescht.
   - name: Check for resume state file
     stat:
-      path: "/tmp/patch_resume_{{ inventory_hostname }}.txt"
+      path: "{{ resume_state_dir }}/patch_resume_{{ inventory_hostname }}.txt"
     register: resume_state_file
     delegate_to: localhost
 
   - name: Load resume state
     set_fact:
-      resume_from: "{{ lookup('file', '/tmp/patch_resume_' + inventory_hostname + '.txt') | trim }}"
+      resume_from: "{{ lookup('file', resume_state_dir + '/patch_resume_' + inventory_hostname + '.txt') | trim }}"
     when: resume_state_file.stat.exists
 
   - name: Set initial state
@@ -63,10 +88,14 @@
       resume_from: "start"
     when: not resume_state_file.stat.exists
 
-  # Standardwerte damit das Log auch bei frühen Fehlern vollständig geschrieben werden kann
+  # Standardwerte, damit das Protokoll auch bei sehr fruehen Fehlern
+  # vollstaendig geschrieben werden kann.
   - name: Initialize defaults for log safety
     set_fact:
       patch_error: ""
+      snapshot_status: "nicht ausgefuehrt"
+      service_info:
+        results: []
       update_result:
         found_update_count: 0
         updates: {}
@@ -84,8 +113,14 @@
 
   - block:
 
+      # --- Snapshot ---------------------------------------------------------
+      # Ohne Rollback-Punkt wird nicht gepatcht. Frueher lief der Patch auch
+      # dann weiter, wenn vCenter nicht erreichbar war oder die VM nicht
+      # gefunden wurde - das Protokoll erwaehnte das mit keinem Wort.
+      # Fuer Hosts ohne vCenter-VM (physisch) snapshot_required: false setzen,
+      # z.B. in inventory/group_vars/windows_notdomain.yml
       - name: Gather VM details
-        community.vmware.vmware_guest_info:
+        vmware.vmware.vm_info:
           hostname: "{{ vcenter_hostname }}"
           username: "{{ vm_user }}"
           password: "{{ vm_password }}"
@@ -95,11 +130,23 @@
           name: "{{ inventory_hostname }}"
         register: vm_info
         delegate_to: localhost
-        ignore_errors: yes
+        failed_when: false
         when: resume_from == 'start'
 
+      - name: Fail if VM was not found and a snapshot is required
+        fail:
+          msg: >-
+            VM '{{ inventory_hostname }}' wurde in vCenter {{ vcenter_hostname }}
+            nicht gefunden ({{ vm_info.msg | default('kein Grund gemeldet') }}).
+            Ohne Snapshot wird nicht gepatcht. Physische Hosts oder VMs ausserhalb
+            dieses vCenters brauchen snapshot_required: false.
+        when:
+          - resume_from == 'start'
+          - snapshot_required | default(true) | bool
+          - vm_info.instance is not defined
+
       - name: Create Snapshots
-        community.vmware.vmware_guest_snapshot:
+        vmware.vmware.vm_snapshot:
           hostname: "{{ vcenter_hostname }}"
           username: "{{ vm_user }}"
           password: "{{ vm_password }}"
@@ -109,40 +156,46 @@
           name: "{{ inventory_hostname }}"
           state: present
           memory_dump: yes
-          snapshot_name: "Windows_Update-{{ ansible_date_time.date }}"
+          snapshot_name: "Windows_Update-{{ ansible_facts['date_time']['date'] }}"
           description: >
-            "Dieser Snapshot wurde automatisch von Ansible am {{ ansible_date_time.date }} um {{ ansible_date_time.time }}
+            "Dieser Snapshot wurde automatisch von Ansible am {{ ansible_facts['date_time']['date'] }} um {{ ansible_facts['date_time']['time'] }}
             vor der Durchführung von Systemupdates generiert. Dies dient der Sicherung des aktuellen Systemzustands,
             um bei Bedarf eine Wiederherstellung auf diesen Punkt zu ermöglichen."
         throttle: 2
         delegate_to: localhost
-        ignore_errors: yes
-        when: resume_from == 'start' and vm_info.instance is defined
+        register: snapshot_result
+        when:
+          - resume_from == 'start'
+          - vm_info.instance is defined
 
+      - name: Record snapshot status
+        set_fact:
+          snapshot_status: >-
+            {{ 'erstellt' if (snapshot_result is defined and snapshot_result is not skipped)
+               else ('uebersprungen (Resume nach ' + resume_from + ')' if resume_from != 'start'
+               else 'uebersprungen (snapshot_required=false)') }}
+
+      # Marker erst schreiben, wenn der Snapshot wirklich durch ist. Frueher
+      # wurde er unbedingt gesetzt: schlug der Snapshot fehl, meldete der
+      # naechste Lauf "snapshot_done" und patchte ohne Rollback-Punkt.
       - name: Save resume checkpoint after snapshot
         copy:
           content: "snapshot_done"
-          dest: "/tmp/patch_resume_{{ inventory_hostname }}.txt"
+          dest: "{{ resume_state_dir }}/patch_resume_{{ inventory_hostname }}.txt"
         delegate_to: localhost
         when: resume_from == 'start'
 
-      - name: Search for windows updates
-        ansible.windows.win_updates:
-          state: searched
-        register: update_result
-        ignore_errors: yes
+      # --- Dienste stoppen --------------------------------------------------
+      - include_tasks: tasks/windows/get-services.yml
 
-      - include_tasks: tasks/task-get-windows-services.yml
-        ignore_errors: yes
+      - include_tasks: tasks/windows/stop-services.yml
 
-      - include_tasks: tasks/task-stop-windows-services.yml
-        ignore_errors: yes
-
+      # --- Updates ----------------------------------------------------------
       - name: Get windows version before
         ansible.windows.win_shell: |
           (Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion').CurrentBuild +'.'+ (Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion').UBR
         register: initial_version
-        ignore_errors: yes
+        failed_when: false
 
       - name: Get reboot started time
         shell: "date +%Y-%m-%d_%H:%M:%S"
@@ -164,19 +217,18 @@
           - UpdateRollup
           state: installed
         register: update_result
-        ignore_errors: yes
 
       - name: Check if reboot is required
         win_reboot:
           reboot_timeout: 1800
         when: update_result.reboot_required
-        ignore_errors: yes
 
+      # --- Kontrollen -------------------------------------------------------
       - name: Get windows version after
         ansible.windows.win_shell: |
           (Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion').CurrentBuild +'.'+ (Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion').UBR
         register: patched_version
-        ignore_errors: yes
+        failed_when: false
 
       - name: Compare windows versions = OK
         set_fact:
@@ -188,43 +240,44 @@
           windows_verson_check: "ToDo: Versionsupdate von {{ initial_version.stdout_lines }} zu {{ patched_version.stdout_lines }} =  KEIN UPDATE"
         when:
           - initial_version.stdout_lines == patched_version.stdout_lines
-          - update_result.found_update_count == 0
+          - update_result.found_update_count | default(0) == 0
 
       - name: Compare windows versions = FAILED
         set_fact:
           windows_verson_check: "ToDo: Versionsupdate von {{ initial_version.stdout_lines }} zu {{ patched_version.stdout_lines }} =  FAILED!"
         when:
           - initial_version.stdout_lines == patched_version.stdout_lines
-          - update_result.found_update_count > 0
+          - update_result.found_update_count | default(0) > 0
 
       - name: Get reboot finished time
         shell: "date +%Y-%m-%d_%H:%M:%S"
         register: reboot_end
         delegate_to: localhost
 
-      - name: Get free diskspace C:\
+      - name: Get free diskspace
         ansible.windows.win_powershell:
           script: |
             "{0:N2}" -f (Get-PSDrive C | Select-Object Free | ForEach-Object { $_.Free / 1GB })
         register: disk_space
-        ignore_errors: yes
+        failed_when: false
 
+      # Nur auswerten, wenn der Task auch etwas geliefert hat - sonst kippte
+      # dieses set_fact mit "undefined" in den rescue-Block und verschleierte
+      # die eigentliche Fehlerursache.
       - name: Set disk space check result
         set_fact:
-            disk_space_gb: "{{ disk_space.output[0] | replace(',', '.') | float }}"
-            windows_diskspace_check: >-
-              {% if (disk_space.output[0] | replace(',', '.') | float) < 16 %}
-              ToDo: Festplattenspeicher {{ disk_space.output[0] | replace(',', '.') | float }} GB = ERROR
-              {% else %}
-              ToDo: Festplattenspeicher {{ disk_space.output[0] | replace(',', '.') | float }} GB = OK
-              {% endif %}
-
-      - include_tasks: tasks/task-start-windows-services.yml
-        ignore_errors: yes
+          disk_space_gb: "{{ disk_space.output[0] | replace(',', '.') | float }}"
+          windows_diskspace_check: >-
+            {% if (disk_space.output[0] | replace(',', '.') | float) < (windows_min_diskspace_gb | float) %}
+            ToDo: Festplattenspeicher {{ disk_space.output[0] | replace(',', '.') | float }} GB = ERROR
+            {% else %}
+            ToDo: Festplattenspeicher {{ disk_space.output[0] | replace(',', '.') | float }} GB = OK
+            {% endif %}
+        when: disk_space.output | default([]) | length > 0
 
       - name: Clear resume state on success
         file:
-          path: "/tmp/patch_resume_{{ inventory_hostname }}.txt"
+          path: "{{ resume_state_dir }}/patch_resume_{{ inventory_hostname }}.txt"
           state: absent
         delegate_to: localhost
 
@@ -234,5 +287,8 @@
           patch_error: "FEHLER in Task '{{ ansible_failed_task.name }}': {{ ansible_failed_result.msg | default('unbekannter Fehler') }}"
 
     always:
-      - include_tasks: tasks/task-write-patchlog-windows.yml
-        ignore_errors: yes
+      # Dienste gehoeren in den always-Block: bricht der Lauf nach dem Stoppen
+      # ab, blieben sie sonst dauerhaft gestoppt zurueck.
+      - include_tasks: tasks/windows/start-services.yml
+
+      - include_tasks: tasks/windows/write-patchlog.yml
