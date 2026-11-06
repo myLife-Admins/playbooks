@@ -187,10 +187,20 @@ Kurznamen wie `glpi-01` oder `fs5` passt damit weder das eine noch das andere.
 Entweder die Inventory auf FQDNs umstellen und `.gutingia.local` eintragen,
 oder die Kurznamen einzeln listen — vCenter nicht vergessen.
 
-Beide Varianten der Domäne eintragen, mit und ohne führenden Punkt: `.gutingia.local`
-trifft `host.gutingia.local`, aber nicht die blanke Domäne selbst. Und die
-Groß- und die Kleinschreibweise müssen denselben Wert haben, sonst hängt es
-davon ab, welche Bibliothek gerade fragt.
+Zum führenden Punkt: der ist weniger wichtig, als es aussieht, aber die beiden
+Bibliotheken behandeln ihn unterschiedlich.
+
+| | `urllib` (ansible-galaxy) | `requests` (WinRM, vCenter) |
+|---|---|---|
+| Vergleich | schneidet den Punkt ab, prüft `(.+\.)?domain$` | stumpfes `endswith` |
+| `gutingia.local` | `dc-1.gutingia.local` ✓, Domäne selbst ✓ | beides ✓, dazu `xgutingia.local` ✓ |
+| `.gutingia.local` | identisch zur Zeile darüber | Subdomains ✓, Domäne selbst ✗ |
+
+Für `ansible-galaxy` ist es also egal. Nur `requests` sieht einen Unterschied,
+und der betrifft ausschließlich einen Host, der exakt `gutingia.local` heißt.
+Am saubersten beide Formen eintragen — `gutingia.local,.gutingia.local` — und
+vor allem in `NO_PROXY` und `no_proxy` **denselben** Wert, sonst hängt das
+Verhalten davon ab, welche Bibliothek gerade fragt.
 
 Verlangt der Proxy Authentifizierung, gehört `http://user:pass@proxy:3128`
 nicht im Klartext in die compose-Datei, sondern als Secret in eine
