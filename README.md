@@ -1,15 +1,35 @@
 # ansible-assets
 
-Patch-Playbooks für die monatlichen Serverupdates. Zwei Einstiegspunkte, sonst nichts.
+Patch-Playbooks für die monatlichen Serverupdates, betrieben über Semaphore.
+
+## Stand dieses Branches
+
+`stable` enthält derzeit nur `update-apt.yml`. Der Commit `clear` (1092d36) hat
+den übrigen Bestand entfernt: `ansible.cfg`, `inventory/`, `requirements.yml`
+und beide Produktions-Playbooks samt `tasks/`. Verloren ist davon nichts, der
+Stand davor liegt in `482ad68` und lässt sich gezielt zurückholen:
+
+```bash
+git checkout 482ad68 -- ansible.cfg inventory playbooks requirements.yml
+```
+
+Die Kapitel [Zugangsdaten](#zugangsdaten), [Fehlerstrategie](#fehlerstrategie)
+und [Fortschritt sehen](#fortschritt-sehen) beschreiben `update-windows-server.yml`.
+Sie gelten unverändert — nur liegen die Dateien dazu gerade nicht im Branch.
 
 ## Setup
+
+Unter Semaphore ist nichts von Hand zu installieren, siehe
+[Betrieb über Semaphore UI](#betrieb-über-semaphore-ui). Für einen lokalen Lauf
+mit installiertem Ansible:
 
 ```bash
 ansible-galaxy collection install -r requirements.yml
 ```
 
 `ansible.cfg` zeigt auf `inventory/hosts`, die Playbooks sind also aus dem
-Repo-Wurzelverzeichnis heraus ohne `-i` aufrufbar.
+Repo-Wurzelverzeichnis heraus ohne `-i` aufrufbar. `update-apt.yml` braucht
+weder das eine noch das andere.
 
 Dort, wo Ansible läuft, muss `{{ protokoll_basis }}` (Standard `/mnt/protokolle`)
 als CIFS-Share `//fs5/it/Protokolle` gemountet sein — dort landen die
@@ -17,19 +37,40 @@ Patchprotokolle unter `<Jahr>/<Monat>/Serverpatch/`.
 
 ## Playbooks
 
-### `playbooks/update-apt.yml` — Linux / APT
+### `update-apt.yml` — Linux / APT
 
-Patcht die Gruppe `linux_server`. Der bisherige Controller gehört dort mit
-rein — unter Semaphore patcht er sich nicht mehr selbst über `localhost`.
+Liegt im Wurzelverzeichnis, weil das Semaphore-Template genau diesen Pfad
+erwartet. Zielgruppe ist `{{ target_hosts | default('all') }}` — ohne gesetzte
+Variable also alles, was die Semaphore-Inventory enthält.
 
-Ablauf pro Host: Log schreiben → `apt upgrade dist` → Reboot falls
-`/var/run/reboot-required` existiert → `autoremove` / `autoclean`.
+**Standardmäßig ändert das Playbook nichts.** `apt_dry_run` steht auf `true`:
+Paketlisten werden aktualisiert, das Upgrade läuft nur im `check_mode`, ein
+nötiger Reboot wird gemeldet statt ausgeführt. Für den echten Lauf:
 
 ```bash
-ansible-playbook playbooks/update-apt.yml
+ansible-playbook update-apt.yml -e apt_dry_run=false
 ```
 
-### `playbooks/update-windows-server.yml` — Windows
+Ablauf: Debian/Ubuntu prüfen → Paketlisten aktualisieren → anstehende Updates
+per `check_mode` ermitteln → Upgrade (nur ohne dry run) →
+`/var/run/reboot-required` prüfen → Zusammenfassung.
+
+Rebootet wird nie, auch nicht mit `apt_dry_run=false` — das unterscheidet es
+vom alten `playbooks/update-apt.yml`. Es benutzt ausschließlich
+`ansible.builtin.*` und braucht deshalb keine Collection aus Galaxy, was es
+hinter dem Proxy als Erstes lauffähig macht.
+
+`become: true` setzt passwortloses sudo für den SSH-Benutzer voraus, sonst
+zusätzlich ein Become-Passwort im Key Store.
+
+Warum `all` und nicht `linux_server`: heißt die Gruppe in der Inventory
+irgendwann anders, matcht ein fester Gruppenname nichts, und Ansible quittiert
+das mit „skipping: no hosts matched" und Exit-Code 0 — ein Lauf, der nichts tut
+und trotzdem grün aussieht.
+
+### `update-windows-server.yml` — Windows
+
+*Derzeit nicht im Branch, siehe [Stand](#stand-dieses-branches).*
 
 Patcht die per `target_hosts` übergebene Gruppe. Zugangsdaten für Domäne und
 vCenter kommen aus den verschlüsselten `vault.yml` (siehe [Zugangsdaten](#zugangsdaten)),
@@ -66,14 +107,105 @@ bricht mit klarer Meldung ab, wenn eine fehlt.
 **`delegate_to: localhost`** — alle vCenter-Aufrufe und das Schreiben der
 Protokolle laufen im Container. Der CIFS-Share muss dort also gemountet sein.
 
+### Repository: gemounteter Ordner statt Git
+
+Wir liegen hinter einem Proxy, der Container kommt nicht an GitHub. Das
+Semaphore-Repository ist deshalb **kein** Git-Remote, sondern der lokale Pfad
+`/playbooks`, den ein Volume in den Container reicht. Semaphore klont dann
+nichts, es liest das Verzeichnis.
+
+Erkennbar ist das im Task-Log: dort stehen Zeilen wie
+`No /playbooks/requirements.yml file found`, und eine Zeile „Updating
+repository" fehlt. Bei einem Git-Repository läge das Arbeitsverzeichnis unter
+`/tmp/semaphore/repository_<id>_<template>`.
+
+Fehlt das Volume, stirbt Ansible schon beim Import:
+
+```
+File "ansible/utils/path.py", line 51, in unfrackpath
+    b_basedir = to_bytes(os.getcwd(), errors='surrogate_or_strict')
+FileNotFoundError: [Errno 2] No such file or directory
+```
+
+Das ist keine Aussage über das Playbook — `os.getcwd()` scheitert, weil das
+Arbeitsverzeichnis des Prozesses nicht existiert. Einrichten:
+
+```bash
+sudo mkdir -p /opt/semaphore/playbooks
+```
+
+Volume eintragen (siehe [Volumes](#volumes)), dann den Container **neu
+erzeugen** — `docker restart` übernimmt neue Volumes nicht:
+
+```bash
+docker compose up -d
+```
+
+```bash
+docker exec semaphore ls -la /playbooks
+```
+
+Zwei Stolpersteine: Der Prozess im Container ist nicht root, bei „Permission
+denied" hilft `chmod -R a+rX` auf dem Host. Und auf RHEL/Rocky/Alma braucht der
+Mount ein `:z`, sonst sieht der Container den Ordner leer — auf Debian/Ubuntu
+nicht.
+
+Der Ordner und GitHub wissen nichts voneinander, Änderungen müssen von Hand
+hinein. Kommt der Docker-Host (anders als der Container) über den Proxy an
+GitHub, ist ein `git clone` in dieses Verzeichnis bequemer; Semaphore liest
+weiterhin nur den Ordner.
+
+### Proxy und Galaxy
+
+`ansible-galaxy` kommt so wenig nach draußen wie Git. Ohne Proxy-Variablen
+lassen sich die Collections aus `requirements.yml` nicht installieren, und
+damit läuft alles außer `update-apt.yml` nicht an. Die Variablen gehören an den
+Container, damit sie sowohl den Galaxy-Schritt als auch das Playbook erreichen:
+
+```yaml
+services:
+  semaphore:
+    environment:
+      HTTP_PROXY: http://proxy:8080
+      HTTPS_PROXY: http://proxy:8080
+      NO_PROXY: localhost,127.0.0.1,gutingia.local,.gutingia.local
+      http_proxy: http://proxy:8080
+      https_proxy: http://proxy:8080
+      no_proxy: localhost,127.0.0.1,gutingia.local,.gutingia.local
+```
+
+Beide Schreibweisen sind kein Versehen: `ansible-galaxy` liest die Umgebung
+über urllib, `pywinrm` und `vmware.vmware` über `requests` — die werten Groß-
+und Kleinschreibung unterschiedlich aus.
+
+**Achtung bei Windows und vCenter.** Mit gesetztem `HTTPS_PROXY` schickt
+`requests` auch WinRM-Verbindungen und vCenter-Aufrufe durch den Proxy; SSH zu
+den Linux-Hosts ist nicht betroffen, das kennt die Variablen nicht. `NO_PROXY`
+hilft dabei nur bedingt: Hostnamen werden per **Suffix** verglichen, eine
+CIDR-Angabe wie `10.0.0.0/8` greift ausschließlich bei nackten IP-Adressen. Auf
+Kurznamen wie `glpi-01` oder `fs5` passt damit weder das eine noch das andere.
+Entweder die Inventory auf FQDNs umstellen und `.gutingia.local` eintragen,
+oder die Kurznamen einzeln listen — vCenter nicht vergessen.
+
+Beide Varianten der Domäne eintragen, mit und ohne führenden Punkt: `.gutingia.local`
+trifft `host.gutingia.local`, aber nicht die blanke Domäne selbst. Und die
+Groß- und die Kleinschreibweise müssen denselben Wert haben, sonst hängt es
+davon ab, welche Bibliothek gerade fragt.
+
+Verlangt der Proxy Authentifizierung, gehört `http://user:pass@proxy:3128`
+nicht im Klartext in die compose-Datei, sondern als Secret in eine
+Semaphore-Environment (im Template das Feld „Variablengruppen"). Sonderzeichen
+im Passwort URL-kodieren, `@` also als `%40`.
+
 ### Einrichtung
 
 | Semaphore-Objekt | Inhalt |
 |---|---|
-| Repository | Dieses Repo als Git-Remote (Semaphore klont per Git) |
-| Inventory | Typ **File**, Pfad `inventory/hosts` |
+| Repository | Lokaler Pfad `/playbooks` — gemountetes Volume, nicht Git |
+| Inventory | Typ **File** mit Pfad `inventory/hosts`, oder statisch in Semaphore gepflegt |
 | Key Store → SSH Key | Key für `ladmin`, an das Inventory hängen (Linux) |
 | Key Store → Ansible Vault | Das Vault-Passwort, an das Template hängen — damit werden die `vault.yml` entschlüsselt |
+| Environment („Variablengruppen") | Proxy-Variablen, sofern nicht container-weit gesetzt |
 | Task Template → Survey Variable | `target_hosts`, am besten als Dropdown mit den Gruppennamen |
 
 Die Windows-Zugangsdaten hängen bewusst **nicht** als „Login with Password" am
@@ -81,18 +213,17 @@ Inventory — siehe [Zugangsdaten](#zugangsdaten). Semaphore bindet dort ein
 einziges Konto ans ganze Inventory; die lokalen Konten bräuchten dann eigene
 Templates.
 
-Collections aus `requirements.yml` installiert Semaphore selbst — prüfen, ob
-deine Version den Pfad im Repo-Wurzelverzeichnis findet.
-
 ### Volumes
 
-Der Container braucht den Protokoll-Share. Ohne ihn schlägt jedes Logging fehl
-und die Resume-Marker landen im Nichts:
+Der Container braucht zwei Mounts: den Playbook-Ordner und den
+Protokoll-Share. Ohne letzteren schlägt jedes Logging fehl und die
+Resume-Marker landen im Nichts:
 
 ```yaml
 services:
   semaphore:
     volumes:
+      - /opt/semaphore/playbooks:/playbooks
       - /mnt/protokolle:/mnt/protokolle
 ```
 
@@ -258,6 +389,17 @@ Nachbetrachtung, aber nicht im Semaphore-Log sichtbar.
 
 ## Aufbau
 
+Im Branch:
+
+```
+update-apt.yml                  Linux-Patchlauf, Pfad des Semaphore-Templates
+README.md
+.gitignore
+```
+
+Nach `git checkout 482ad68 -- …` (siehe [Stand](#stand-dieses-branches)) kommt
+der volle Bestand zurück:
+
 ```
 ansible.cfg                     Inventory-Pfad, Ausgabe-Callbacks, forks
 requirements.yml                ansible.windows, vmware.vmware, ansible.posix
@@ -273,7 +415,7 @@ inventory/
   host_vars/
     myrootca1.yml               Einzelfall, siehe Zugangsdaten
 playbooks/
-  update-apt.yml
+  update-apt.yml                ältere Fassung mit Reboot, siehe Playbooks
   update-windows-server.yml
   tasks/
     linux/    dist-upgrade.yml, write-log.yml
@@ -283,6 +425,11 @@ playbooks/
 
 Die Trennung ist bewusst: **Inventory** beantwortet „wie erreiche ich den Host",
 **group_vars** beantwortet „was mache ich mit ihm".
+
+Dass `update-apt.yml` im Wurzelverzeichnis liegt und die übrigen Playbooks
+unter `playbooks/`, ist kein Konzept, sondern der Pfad, auf den das Template
+„myPatchTest" zeigt. Beim Zusammenführen also entweder das Template
+nachziehen oder die Datei verschieben.
 
 ## Inventory
 
