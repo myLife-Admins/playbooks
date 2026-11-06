@@ -1,6 +1,0 @@
----
-collections:
-  - name: ansible.windows
-  - name: vmware.vmware
-  # profile_tasks / timer Callbacks - siehe ansible.cfg
-  - name: ansible.posix

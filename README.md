@@ -10,8 +10,10 @@ und beide Produktions-Playbooks samt `tasks/`. Verloren ist davon nichts, der
 Stand davor liegt in `482ad68` und lässt sich gezielt zurückholen:
 
 ```bash
-git checkout 482ad68 -- ansible.cfg inventory playbooks requirements.yml
+git checkout 482ad68 -- ansible.cfg inventory playbooks
 ```
+
+`requirements.yml` bleibt bewusst draußen, siehe [Collections](#collections).
 
 Die Kapitel [Zugangsdaten](#zugangsdaten), [Fehlerstrategie](#fehlerstrategie)
 und [Fortschritt sehen](#fortschritt-sehen) beschreiben `update-windows-server.yml`.
@@ -19,12 +21,13 @@ Sie gelten unverändert — nur liegen die Dateien dazu gerade nicht im Branch.
 
 ## Setup
 
-Unter Semaphore ist nichts von Hand zu installieren, siehe
-[Betrieb über Semaphore UI](#betrieb-über-semaphore-ui). Für einen lokalen Lauf
-mit installiertem Ansible:
+Unter Semaphore ist nichts zu installieren: das Image bringt das volle
+`ansible`-Paket mit, und damit alle Collections, die hier gebraucht werden —
+siehe [Collections](#collections). Für einen lokalen Lauf mit bloßem
+`ansible-core`:
 
 ```bash
-ansible-galaxy collection install -r requirements.yml
+ansible-galaxy collection install ansible.windows vmware.vmware ansible.posix
 ```
 
 `ansible.cfg` zeigt auf `inventory/hosts`, die Playbooks sind also aus dem
@@ -155,12 +158,34 @@ hinein. Kommt der Docker-Host (anders als der Container) über den Proxy an
 GitHub, ist ein `git clone` in dieses Verzeichnis bequemer; Semaphore liest
 weiterhin nur den Ordner.
 
-### Proxy und Galaxy
+### Collections
 
-`ansible-galaxy` kommt so wenig nach draußen wie Git. Ohne Proxy-Variablen
-lassen sich die Collections aus `requirements.yml` nicht installieren, und
-damit läuft alles außer `update-apt.yml` nicht an. Die Variablen gehören an den
-Container, damit sie sowohl den Galaxy-Schritt als auch das Playbook erreichen:
+Es liegt **bewusst keine `requirements.yml`** im Repo. Das Semaphore-Image
+enthält das vollständige `ansible`-Paket (13.5.0), darin stecken rund hundert
+Collections — unter anderem die drei, um die es hier geht:
+
+| Collection | im Image | wofür |
+|---|---|---|
+| `ansible.windows` | 3.5.0 | `win_updates`, `win_shell`, `win_powershell` |
+| `vmware.vmware` | 2.8.0 | Snapshots über vCenter |
+| `ansible.posix` | 2.1.0 | `profile_tasks` / `timer` Callbacks |
+
+Grund für das Weglassen: Semaphore ruft den Galaxy-Install **vor jedem Task**
+auf. Steht dort eine `requirements.yml` ohne Versionsangabe, zieht er jedes Mal
+die neueste Fassung nach `~/.ansible/collections`, und die hat Vorrang vor der
+im Image. Der Patchlauf im Dezember liefe dann womöglich mit einer anderen
+`ansible.windows` als der getestete im November — unangekündigt, mitten im
+Wartungsfenster. Ohne die Datei ist der Stand an das Image gebunden und
+wechselt nur, wenn ihr das Image wechselt.
+
+Wird doch einmal eine Collection gebraucht, die nicht dabei ist: `requirements.yml`
+anlegen **und Versionen festnageln**, sonst handelt man sich die Drift wieder ein.
+
+### Proxy
+
+Der Container kommt nur über den Proxy nach draußen — Git, Galaxy und alles
+weitere. Die Variablen gehören an den Container, damit sie sowohl einen
+etwaigen Galaxy-Schritt als auch das Playbook erreichen:
 
 ```yaml
 services:
@@ -380,10 +405,9 @@ die als aggregate-Callbacks nebenherlaufen). Alle in `community.general`:
 - `timestamp` — Zeitstempel an jeden Kopf
 - `dense` — minimale, sich überschreibende Fortschrittsanzeige
 
-Nicht aktiviert, weil `community.general` eine sehr große Collection ist, die
-sonst nirgends gebraucht wird. Bei Bedarf in `requirements.yml` aufnehmen und
-`stdout_callback = community.general.counter_enabled` in der `ansible.cfg`
-setzen.
+Nicht aktiviert, weil keiner davon gebraucht wird. `community.general` (12.5.0)
+steckt im Image, nachzuinstallieren ist also nichts — es genügt
+`stdout_callback = community.general.counter_enabled` in der `ansible.cfg`.
 
 ### Was Ansible nicht kann
 
@@ -412,7 +436,6 @@ der volle Bestand zurück:
 
 ```
 ansible.cfg                     Inventory-Pfad, Ausgabe-Callbacks, forks
-requirements.yml                ansible.windows, vmware.vmware, ansible.posix
 inventory/
   hosts                         Hostgruppen + Verbindungsparameter
   group_vars/
