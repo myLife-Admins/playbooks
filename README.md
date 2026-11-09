@@ -151,12 +151,29 @@ Protokolle laufen im Container. Der CIFS-Share muss dort also gemountet sein.
 
 ### Repository: gemounteter Ordner statt Git
 
-Wir liegen hinter einem Proxy, der Container kommt nicht an GitHub. Das
-Semaphore-Repository ist deshalb **kein** Git-Remote, sondern der lokale Pfad
+Das Semaphore-Repository ist **kein** Git-Remote, sondern der lokale Pfad
 `/playbooks`, den ein Volume in den Container reicht. Semaphore klont dann
-nichts, es liest das Verzeichnis.
+nichts, es liest das Verzeichnis. Aktualisiert wird es über das Template
+[`pull-playbooks.yml`](#pull-playbooksyml--ordner-aktualisieren).
 
-Erkennbar ist das im Task-Log: dort stehen Zeilen wie
+Angefangen hat das als Notlösung, weil der Container nicht an GitHub kam. Seit
+der Proxy durchgereicht wird, ginge auch Git direkt. Der Ordner bleibt
+trotzdem, und zwar **als Puffer für den Fall, dass das Internet weg ist**:
+
+- Bei einem Git-Repository zieht Semaphore vor **jedem** Task den aktuellen
+  Stand. Ist GitHub nicht erreichbar, bricht der Task ab, bevor das Playbook
+  startet — auch ein rein interner Job: ein Patchlauf gegen den WSUS, eine
+  VM aus vCenter, das Einsammeln von Protokollen.
+- Der Klon dafür liegt in `/tmp` im Container und ist nach jedem Neuerzeugen
+  weg. Es gibt also nicht einmal einen alten Stand, auf den man zurückfallen
+  könnte.
+- Mit dem Ordner scheitert in dem Fall nur der Pull. Alles andere läuft mit
+  dem zuletzt gezogenen Stand weiter.
+
+Nebeneffekt: Änderungen landen erst, wenn jemand den Pull anstößt. Ein Commit
+auf `stable` verändert also nicht stillschweigend den nächsten Lauf.
+
+Erkennbar ist der Ordner-Betrieb im Task-Log: dort stehen Zeilen wie
 `No /playbooks/requirements.yml file found`, und eine Zeile „Updating
 repository" fehlt. Bei einem Git-Repository läge das Arbeitsverzeichnis unter
 `/tmp/semaphore/repository_<id>_<template>`.
@@ -170,10 +187,16 @@ FileNotFoundError: [Errno 2] No such file or directory
 ```
 
 Das ist keine Aussage über das Playbook — `os.getcwd()` scheitert, weil das
-Arbeitsverzeichnis des Prozesses nicht existiert. Einrichten:
+Arbeitsverzeichnis des Prozesses nicht existiert.
+
+Einrichten — der Ordner ist ein Git-Klon und gehört dem Container-Benutzer:
 
 ```bash
-sudo mkdir -p /opt/semaphore/playbooks
+sudo git clone https://github.com/myLife-Admins/playbooks.git /opt/docker/semaphore/playbooks
+```
+
+```bash
+sudo chown -R 1001:0 /opt/docker/semaphore/playbooks
 ```
 
 Volume eintragen (siehe [Volumes](#volumes)), dann den Container **neu
@@ -187,15 +210,9 @@ docker compose up -d
 docker exec semaphore ls -la /playbooks
 ```
 
-Zwei Stolpersteine: Der Prozess im Container ist nicht root, bei „Permission
-denied" hilft `chmod -R a+rX` auf dem Host. Und auf RHEL/Rocky/Alma braucht der
-Mount ein `:z`, sonst sieht der Container den Ordner leer — auf Debian/Ubuntu
-nicht.
-
-Der Ordner und GitHub wissen nichts voneinander, Änderungen müssen von Hand
-hinein. Kommt der Docker-Host (anders als der Container) über den Proxy an
-GitHub, ist ein `git clone` in dieses Verzeichnis bequemer; Semaphore liest
-weiterhin nur den Ordner.
+Auf RHEL/Rocky/Alma braucht der Mount ein `:z`, sonst sieht der Container den
+Ordner leer — auf Debian/Ubuntu nicht. Ein `:ro` dagegen darf nicht dran, sonst
+scheitert der Pull mit `Read-only file system`.
 
 ### Collections
 
@@ -348,7 +365,7 @@ Resume-Marker landen im Nichts:
 services:
   semaphore:
     volumes:
-      - /opt/semaphore/playbooks:/playbooks
+      - /opt/docker/semaphore/playbooks:/playbooks
       - /mnt/protokolle:/mnt/protokolle
 ```
 
