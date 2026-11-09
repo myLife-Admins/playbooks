@@ -238,7 +238,7 @@ im Passwort URL-kodieren, `@` also als `%40`.
 |---|---|
 | Repository | Lokaler Pfad `/playbooks` — gemountetes Volume, nicht Git |
 | Inventory | Typ **File** mit Pfad `inventory/hosts`, oder statisch in Semaphore gepflegt |
-| Key Store → SSH Key | Key für `ladmin`, an das Inventory hängen (Linux) |
+| Key Store → SSH Key | Eigener ed25519-Key für das Dienstkonto `ansible`, an das Inventory hängen (Linux) |
 | Key Store → Ansible Vault | Das Vault-Passwort, an das Template hängen — damit werden die `vault.yml` entschlüsselt |
 | Environment („Variablengruppen") | Proxy-Variablen, sofern nicht container-weit gesetzt |
 | Task Template → Survey Variable | `target_hosts`, am besten als Dropdown mit den Gruppennamen |
@@ -247,6 +247,42 @@ Die Windows-Zugangsdaten hängen bewusst **nicht** als „Login with Password" a
 Inventory — siehe [Zugangsdaten](#zugangsdaten). Semaphore bindet dort ein
 einziges Konto ans ganze Inventory; die lokalen Konten bräuchten dann eigene
 Templates.
+
+### Linux-Gruppen im Inventory
+
+```
+[linux_server:vars]
+ansible_user=ansible
+ansible_python_interpreter=/usr/bin/python3
+```
+
+**Zum Interpreter.** Ohne die Zeile rät Ansible bei jeder Verbindung, welches
+Python auf dem Ziel zu nehmen ist, und warnt entsprechend. Das Raten ist nicht
+stabil: kommt später eine weitere Version dazu, kann die Erkennung dorthin
+springen — und dann fehlt dem `apt`-Modul `python3-apt`, das nur für den
+System-Python der Distribution installiert ist. Der Fehler lautet dann
+„Could not import python modules: apt, apt_pkg" und sieht nach einem Problem
+am Playbook aus. `/usr/bin/python3` ist der Symlink der Distribution und zeigt
+nach einem Upgrade von selbst auf die richtige Version; eine harte Angabe wie
+`/usr/bin/python3.12` überlebt das nächste Release-Upgrade nicht.
+
+Alternativ ließe sich die Warnung mit `interpreter_python = auto_silent` in der
+`ansible.cfg` stummschalten — das behebt aber nur die Meldung, nicht die
+Ursache.
+
+**Zum Konto.** Eigenes Dienstkonto `ansible` auf den Zielhosts, eigener
+Schlüssel, der ausschließlich in Semaphores Key Store liegt, und
+passwortloses sudo:
+
+```bash
+echo 'ansible ALL=(ALL) NOPASSWD: ALL' | sudo tee /etc/sudoers.d/ansible && sudo chmod 440 /etc/sudoers.d/ansible && sudo visudo -c
+```
+
+`NOPASSWD` auf einzelne Befehle einzuschränken funktioniert mit Ansible nicht:
+Module laufen nicht als `apt`, sondern als `/usr/bin/python3 /tmp/…/AnsiballZ_apt.py`,
+und dieser Pfad ist bei jedem Lauf ein anderer. Die Eingrenzung muss deshalb
+woanders herkommen — eigenes Konto, `from="<semaphore-ip>"` in der
+`authorized_keys`, Schlüssel nur im Key Store.
 
 ### Volumes
 
