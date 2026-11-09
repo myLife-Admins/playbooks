@@ -134,19 +134,38 @@ nicht davon abhängt, in welcher Sprache winget antwortet (als SYSTEM auf einem
 deutschen Server: deutsch). Im Log steht danach etwa:
 
 ```
-aktualisiert: 1 | fehlgeschlagen: 1 | nicht anwendbar: 0 | uebersprungen: 0
+aktualisiert: 1 | nicht bestaetigt: 0 | fehlgeschlagen: 1 | nicht anwendbar: 0 | uebersprungen: 0 | gepinnt: 1
 [OK]         7zip.7zip                                26.05.00.0 -> 26.06
 [FEHLER]     Mozilla.Firefox.de                       131.0 -> 132.0  0x8A150101  Programm laeuft gerade
-Hinweis von winget: 1 Pakete verfügen über Pins, die ein Upgrade verhindern. …
+Gepinnt - werden nur von Hand aktualisiert:
+[GEPINNT]    angryziber.AngryIPScanner                3.9.3 -> 3.10.0
 ```
 
 | Status | Bedeutung |
 |---|---|
 | `anstehend` | nur gelistet (dry run) |
-| `aktualisiert` | Exit-Code 0 |
+| `aktualisiert` | Exit-Code 0, und die Nachkontrolle listet das Paket nicht mehr |
+| `nicht bestaetigt` | Exit-Code 0, aber das Paket steht nach der Nachkontrolle noch in der Liste |
 | `nicht anwendbar` | `0x8A15002B` — winget fand für dieses System kein passendes Update |
 | `fehlgeschlagen` | jeder andere Code; die letzten fünf Zeilen der winget-Ausgabe stehen dabei |
 | `uebersprungen` | ID in der Liste abgeschnitten (`…`), nicht eindeutig aufrufbar |
+
+**Nachkontrolle.** Manche Installer kehren sofort zurück und installieren im
+Hintergrund weiter — winget meldet dann Erfolg, bevor das Programm wirklich
+neu ist. Nach den Updates listet das Playbook deshalb erneut, alle 20 s, bis
+die aktualisierten Pakete verschwunden sind, höchstens `winget_verify_seconds`
+lang (Standard 180). Erst danach geht die Mail raus. Was dann noch dasteht,
+wird `nicht bestaetigt`: entweder noch nicht fertig, oder winget erkennt die
+neue Version nicht — das gibt es bei einzelnen Paketen dauerhaft. Es ist eine
+Warnung, kein Fehler; der Lauf wird davon nicht rot. Steht ein Paket bei jedem
+Lauf so da, ist es Letzteres.
+
+**Gepinnte Pakete.** Pins heißen „nur von Hand aktualisieren", und das
+Playbook fasst sie nicht an. Damit sie trotzdem nicht aus dem Blick geraten,
+stehen die mit verfügbarem Update in einem eigenen Abschnitt. Erkannt werden
+sie am Unterschied zwischen `winget upgrade` und `winget upgrade --include-pinned`;
+eine Pin-Liste muss dafür nicht gelesen werden. Pins setzt und entfernt man
+am Host mit `winget pin add --id <id>` bzw. `winget pin remove --id <id>`.
 
 Probleme brechen einen Host nicht ab, sondern werden gesammelt: ein
 fehlgeschlagenes Paket, ein nicht erreichbarer Host, fehlendes winget, ein
@@ -187,7 +206,7 @@ STARTTLS am Zertifikat des internen Servers, `mail_secure: never` setzen.
 Die Tabelle von `winget upgrade` wird über die Positionen der Überschriften
 gelesen, nicht über deren Text. Mit `--source` hat sie vier Spalten (Name, ID,
 Version, Verfügbar), ohne fünf. Passt das Format nicht, liest das Playbook
-lieber gar nichts als falsch und gibt die Rohausgabe aus. Pins und Pakete mit
+lieber gar nichts als falsch und gibt die Rohausgabe aus. Pakete mit
 unbekannter Version überspringt winget selbst; das steht als Hinweis im
 Bericht.
 
@@ -220,7 +239,13 @@ ansible_connection=winrm
 ansible_winrm_transport=ntlm
 ansible_port=5985
 ansible_winrm_server_cert_validation=ignore
+ansible_winrm_operation_timeout_sec=1000
+ansible_winrm_read_timeout_sec=1200
 ```
+
+Die beiden Timeouts stammen aus dem alten Inventory, das damit die langen
+Windows-Update-Läufe abgesichert hat. Ein winget-Lauf mit vielen Paketen und
+Nachkontrolle dauert ebenfalls Minuten.
 
 Zugangsdaten für einen Testhost am einfachsten als „Login with Password" im
 Key Store, als User Credentials ans Inventory gehängt — Benutzer als

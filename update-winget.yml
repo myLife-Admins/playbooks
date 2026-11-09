@@ -42,6 +42,9 @@
     # Nur das Community-Repository. Die Store-Quelle braucht Store-Zugang
     # und scheitert auf Servern.
     winget_source: winget
+    # Nachkontrolle: so lange wird nach den Updates hoechstens gewartet, bis
+    # die aktualisierten Pakete aus der Liste verschwunden sind.
+    winget_verify_seconds: 180
 
   tasks:
     # Fuer den Bericht im zweiten Play: welche Hosts dieser Lauf hatte,
@@ -66,12 +69,14 @@
         parameters:
           Mode: "{{ 'list' if (winget_dry_run | bool) else 'upgrade' }}"
           Source: "{{ winget_source }}"
+          VerifySeconds: "{{ winget_verify_seconds | int }}"
         script: |
           [CmdletBinding()]
           param (
               [ValidateSet('list', 'upgrade')]
               [string]$Mode,
-              [string]$Source
+              [string]$Source,
+              [int]$VerifySeconds
           )
           # Bewusst nicht 'Stop': PowerShell 5.1 bricht sonst bei der ersten
           # Zeile auf stderr eines externen Programms ab.
@@ -172,13 +177,41 @@
               [pscustomobject]@{ Parsed = $true; Rows = $rows; Notes = $notes }
           }
 
-          $listing = Invoke-Winget -Arguments (@('upgrade') + $common)
           # 0x8A150014 / 0x8A15002B: nichts gefunden bzw. nichts anwendbar -
           # beim Listen heisst das schlicht "alles aktuell".
-          $listingOk = $listing.Hex -in @('0x00000000', '0x8A150014', '0x8A15002B')
-          $table = if ($listingOk) { ConvertFrom-WingetTable -Lines $listing.Lines } else { $null }
-          $rows = @(if ($table) { $table.Rows })
-          $notes = @(if ($table) { $table.Notes })
+          $listOkCodes = @('0x00000000', '0x8A150014', '0x8A15002B')
+
+          function Get-UpgradeRows {
+              param ([string[]]$Extra = @())
+              $l = Invoke-Winget -Arguments (@('upgrade') + $Extra + $common)
+              $ok = $l.Hex -in $listOkCodes
+              $t = if ($ok) { ConvertFrom-WingetTable -Lines $l.Lines } else { $null }
+              [pscustomobject]@{
+                  Ok    = $ok
+                  Hex   = $l.Hex
+                  Lines = $l.Lines
+                  Rows  = @(if ($t) { $t.Rows })
+                  Notes = @(if ($t) { $t.Notes })
+              }
+          }
+
+          $listing = Get-UpgradeRows
+          $listingOk = $listing.Ok
+          $rows = $listing.Rows
+          # Den Hinweis auf Pins ersetzt der eigene Abschnitt weiter unten.
+          # Erkannt wird er am Argument --include-pinned, das in jeder
+          # Sprache gleich lautet.
+          $notes = @($listing.Notes | Where-Object { $_ -notmatch '--include-pinned' })
+
+          # Gepinnte Pakete laesst winget beim normalen Listen weg, mit
+          # --include-pinned sind sie dabei - der Unterschied sind die Pins.
+          # Angefasst werden sie nicht: ein Pin heisst "nur von Hand".
+          $pinned = @()
+          if ($listingOk) {
+              $withPinned = Get-UpgradeRows -Extra @('--include-pinned')
+              $normalIds = @($rows | ForEach-Object { $_.id })
+              $pinned = @($withPinned.Rows | Where-Object { $_.id -notin $normalIds })
+          }
 
           $packages = @(foreach ($row in $rows) {
               $entry = [ordered]@{
@@ -213,37 +246,76 @@
               [pscustomobject]$entry
           })
 
+          # Nachkontrolle: Manche Installer kehren sofort zurueck und
+          # installieren im Hintergrund weiter. Deshalb erneut listen, bis die
+          # aktualisierten Pakete verschwunden sind - hoechstens
+          # $VerifySeconds lang. Was danach noch dasteht, ist "nicht
+          # bestaetigt": entweder noch nicht fertig, oder winget erkennt die
+          # neue Version nicht (das gibt es bei einzelnen Paketen dauerhaft).
+          $updatedIds = @($packages | Where-Object { $_.status -eq 'aktualisiert' } | ForEach-Object { $_.id })
+          if ($updatedIds.Count -gt 0) {
+              $deadline = (Get-Date).AddSeconds($VerifySeconds)
+              while ($true) {
+                  $check = Get-UpgradeRows
+                  # Scheitert schon das Listen, laesst sich nichts bestaetigen.
+                  $left = @(if ($check.Ok) {
+                      $stillIds = @($check.Rows | ForEach-Object { $_.id })
+                      $updatedIds | Where-Object { $_ -in $stillIds }
+                  } else { $updatedIds })
+                  if ($left.Count -eq 0 -or (Get-Date) -ge $deadline) { break }
+                  Start-Sleep -Seconds 20
+              }
+              foreach ($p in $packages) {
+                  if ($p.id -in $left) {
+                      $p.status = 'nicht bestaetigt'
+                      $p.hint = 'winget meldet Erfolg, listet das Paket aber weiter'
+                  }
+              }
+          }
+
           function Get-StatusCount {
               param ([string]$Status)
               @($packages | Where-Object { $_.status -eq $Status }).Count
           }
           $counts = [ordered]@{
-              anstehend       = Get-StatusCount 'anstehend'
-              aktualisiert    = Get-StatusCount 'aktualisiert'
-              fehlgeschlagen  = Get-StatusCount 'fehlgeschlagen'
-              nicht_anwendbar = Get-StatusCount 'nicht anwendbar'
-              uebersprungen   = Get-StatusCount 'uebersprungen'
+              anstehend        = Get-StatusCount 'anstehend'
+              aktualisiert     = Get-StatusCount 'aktualisiert'
+              nicht_bestaetigt = Get-StatusCount 'nicht bestaetigt'
+              fehlgeschlagen   = Get-StatusCount 'fehlgeschlagen'
+              nicht_anwendbar  = Get-StatusCount 'nicht anwendbar'
+              uebersprungen    = Get-StatusCount 'uebersprungen'
+              gepinnt          = $pinned.Count
           }
 
           $tags = @{
-              'anstehend'       = '[ANSTEHEND]'
-              'aktualisiert'    = '[OK]'
-              'fehlgeschlagen'  = '[FEHLER]'
-              'nicht anwendbar' = '[N/A]'
-              'uebersprungen'   = '[SKIP]'
+              'anstehend'        = '[ANSTEHEND]'
+              'aktualisiert'     = '[OK]'
+              'nicht bestaetigt' = '[PRUEFEN]'
+              'fehlgeschlagen'   = '[FEHLER]'
+              'nicht anwendbar'  = '[N/A]'
+              'uebersprungen'    = '[SKIP]'
           }
           $report = @()
           if ($Mode -eq 'list') {
-              $report += '{0} Update(s) anstehend - nur gelistet, nichts installiert' -f $packages.Count
+              $report += '{0} Update(s) anstehend, {1} gepinnt - nur gelistet, nichts installiert' -f `
+                  $packages.Count, $pinned.Count
           } else {
-              $report += 'aktualisiert: {0} | fehlgeschlagen: {1} | nicht anwendbar: {2} | uebersprungen: {3}' -f `
-                  $counts.aktualisiert, $counts.fehlgeschlagen, $counts.nicht_anwendbar, $counts.uebersprungen
+              $report += ('aktualisiert: {0} | nicht bestaetigt: {1} | fehlgeschlagen: {2} | ' +
+                          'nicht anwendbar: {3} | uebersprungen: {4} | gepinnt: {5}') -f `
+                  $counts.aktualisiert, $counts.nicht_bestaetigt, $counts.fehlgeschlagen,
+                  $counts.nicht_anwendbar, $counts.uebersprungen, $counts.gepinnt
           }
           foreach ($p in $packages) {
               $line = '{0,-12} {1,-40} {2} -> {3}' -f $tags[$p.status], $p.id, $p.version, $p.available
-              if ($p.rc_hex -and $p.status -ne 'aktualisiert') { $line += '  ' + $p.rc_hex }
+              if ($p.rc_hex -and $p.status -notin 'aktualisiert', 'nicht bestaetigt') { $line += '  ' + $p.rc_hex }
               if ($p.hint) { $line += '  ' + $p.hint }
               $report += $line
+          }
+          if ($pinned.Count -gt 0) {
+              $report += 'Gepinnt - werden nur von Hand aktualisiert:'
+              foreach ($p in $pinned) {
+                  $report += '{0,-12} {1,-40} {2} -> {3}' -f '[GEPINNT]', $p.id, $p.version, $p.available
+              }
           }
           foreach ($n in $notes) { $report += 'Hinweis von winget: ' + $n.Trim() }
 
@@ -254,6 +326,7 @@
               listing_ok = $listingOk
               listing_rc = $listing.Hex
               packages   = $packages
+              pinned     = $pinned
               notes      = $notes
               counts     = $counts
               report     = $report
@@ -360,11 +433,15 @@
           {%- set ok = counts | map(attribute='aktualisiert', default=0) | map('int') | sum -%}
           {%- set failed = counts | map(attribute='fehlgeschlagen', default=0) | map('int') | sum -%}
           {%- set pending = counts | map(attribute='anstehend', default=0) | map('int') | sum -%}
+          {%- set unconfirmed = counts | map(attribute='nicht_bestaetigt', default=0) | map('int') | sum -%}
+          {%- set pinned = counts | map(attribute='gepinnt', default=0) | map('int') | sum -%}
           {%- set problems = results | selectattr('problem') | list | length -%}
           {%- set totals = [
                 ((ok ~ ' aktualisiert') if ok else ''),
+                ((unconfirmed ~ ' nicht bestaetigt') if unconfirmed else ''),
                 ((failed ~ ' fehlgeschlagen') if failed else ''),
-                ((pending ~ ' anstehend') if pending else '')
+                ((pending ~ ' anstehend') if pending else ''),
+                ((pinned ~ ' gepinnt') if pinned else '')
               ] | select | join(', ') -%}
           {%- if results | length == 0 -%}
           [winget] kein Host getroffen - Inventory pruefen
