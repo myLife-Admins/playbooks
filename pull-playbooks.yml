@@ -54,9 +54,11 @@
       ansible.builtin.assert:
         that: dir_stat.stat.writeable
         fail_msg: >-
-          {{ repo_dir }} ist fuer den Task-Benutzer nicht schreibbar - die
-          Dateien gehoeren vermutlich root. Auf dem Docker-Host die
-          Eigentuemerschaft des Ordners anpassen.
+          {{ repo_dir }} ist fuer den Task-Benutzer nicht schreibbar. Zwei
+          moegliche Ursachen: (1) das Volume ist read-only gemountet - ':ro'
+          in der compose-Datei streichen, dann 'docker compose up -d';
+          (2) die Dateien gehoeren nicht dem Container-Benutzer - auf dem
+          Docker-Host 'chown -R 1001:0' auf den Ordner.
         quiet: true
 
     - name: Stand vor dem Pull

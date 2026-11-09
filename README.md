@@ -55,6 +55,9 @@ abbricht:
 
 - `/playbooks` ist ein **Klon**, keine Kopie der Dateien. Einmalig auf dem Host:
   `git clone https://github.com/myLife-Admins/playbooks.git /opt/docker/semaphore/playbooks`
+- Das Volume ist **ohne `:ro`** gemountet. Ein schreibgeschützter Mount ist
+  sonst eine sinnvolle Absicherung, verträgt sich aber nicht mit dem Pull —
+  git meldet dann `cannot open '.git/FETCH_HEAD': Read-only file system`.
 - Der Ordner gehört dem Container-Benutzer (`uid=1001`, `gid=0`). Nach einem
   `sudo git clone` gehört alles root, und der Pull scheitert:
   `sudo chown -R 1001:0 /opt/docker/semaphore/playbooks`
