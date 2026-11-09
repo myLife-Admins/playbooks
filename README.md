@@ -40,6 +40,32 @@ Patchprotokolle unter `<Jahr>/<Monat>/Serverpatch/`.
 
 ## Playbooks
 
+### `pull-playbooks.yml` — Ordner aktualisieren
+
+Eigenes Template, das `git pull --ff-only` im Playbook-Ordner ausführt. Damit
+holt man neue Stände aus dem Git, ohne sich auf den Docker-Host einzuloggen.
+
+Läuft gegen `localhost`, also **im Task-Container** — und das ist hier genau
+richtig: dessen `/playbooks` ist per Volume derselbe Ordner wie
+`/opt/docker/semaphore/playbooks` auf dem Host. Ein Inventory wird nicht
+benutzt.
+
+Drei Voraussetzungen, die das Playbook vorab prüft und sonst mit klarer Meldung
+abbricht:
+
+- `/playbooks` ist ein **Klon**, keine Kopie der Dateien. Einmalig auf dem Host:
+  `git clone https://github.com/myLife-Admins/playbooks.git /opt/docker/semaphore/playbooks`
+- Der Ordner ist für den Container-Benutzer schreibbar. Gehören die Dateien
+  `root`, scheitert der Pull.
+- Die Proxy-Variablen hängen am Container, siehe [Proxy](#proxy).
+
+`safe.directory` gibt das Playbook bei jedem Aufruf mit, statt es global zu
+setzen — git verweigert sonst mit „dubious ownership", und eine Konfiguration
+im Container überlebt `docker compose up -d` nicht.
+
+`--ff-only` ist Absicht: gibt es lokale Änderungen im Ordner, bricht der Pull
+ab, statt sie wegzuräumen oder einen Merge-Commit zu bauen.
+
 ### `update-apt.yml` — Linux / APT
 
 Liegt im Wurzelverzeichnis, weil das Semaphore-Template genau diesen Pfad

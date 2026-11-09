@@ -1,0 +1,91 @@
+---
+# Holt den Playbook-Ordner per git pull auf den neuesten Stand.
+#
+# Laeuft gegen 'localhost', also im Semaphore-Task-Container. Dessen
+# /playbooks ist per Volume derselbe Ordner wie /opt/docker/semaphore/playbooks
+# auf dem Docker-Host - ein Pull hier landet also auch dort.
+#
+# Voraussetzungen:
+#   - /playbooks ist ein Git-Klon, keine Kopie der Dateien
+#     (einmalig: git clone https://github.com/myLife-Admins/playbooks.git ...)
+#   - der Benutzer im Container darf darin schreiben
+#   - Proxy-Variablen haengen am Container, sonst kommt git nicht nach draussen
+#
+# In Semaphore als eigenes Task-Template anlegen, Playbook-Pfad
+# pull-playbooks.yml, Inventory beliebig - es wird keines benutzt.
+
+- name: Playbook-Ordner aktualisieren
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  # git soll englisch reden, sonst greift die changed_when-Pruefung unten nicht.
+  environment:
+    LC_ALL: C
+
+  vars:
+    repo_dir: /playbooks
+    # git verweigert den Dienst in fremden Verzeichnissen ("dubious ownership").
+    # safe.directory wird pro Aufruf mitgegeben statt global gesetzt: eine
+    # Konfiguration im Container ueberlebt 'docker compose up -d' nicht.
+    git_cmd: "git -c safe.directory={{ repo_dir }} -C {{ repo_dir }}"
+
+  tasks:
+    - name: Pruefen, ob ein Git-Klon vorliegt
+      ansible.builtin.stat:
+        path: "{{ repo_dir }}/.git"
+      register: git_dir
+
+    - name: Abbrechen, wenn kein Git-Klon
+      ansible.builtin.assert:
+        that: git_dir.stat.exists
+        fail_msg: >-
+          {{ repo_dir }} ist kein Git-Klon, sondern vermutlich eine Kopie der
+          Dateien. Einmalig auf dem Docker-Host anlegen, dann laeuft dieses
+          Playbook.
+        quiet: true
+
+    - name: Schreibrecht pruefen
+      ansible.builtin.stat:
+        path: "{{ repo_dir }}"
+      register: dir_stat
+
+    - name: Abbrechen, wenn nicht schreibbar
+      ansible.builtin.assert:
+        that: dir_stat.stat.writeable
+        fail_msg: >-
+          {{ repo_dir }} ist fuer den Task-Benutzer nicht schreibbar - die
+          Dateien gehoeren vermutlich root. Auf dem Docker-Host die
+          Eigentuemerschaft des Ordners anpassen.
+        quiet: true
+
+    - name: Stand vor dem Pull
+      ansible.builtin.command: "{{ git_cmd }} rev-parse --short HEAD"
+      register: rev_before
+      changed_when: false
+
+    - name: Aenderungen holen
+      ansible.builtin.command: "{{ git_cmd }} pull --ff-only"
+      register: pull_result
+      changed_when: "'Already up to date' not in pull_result.stdout"
+
+    - name: Stand nach dem Pull
+      ansible.builtin.command: "{{ git_cmd }} rev-parse --short HEAD"
+      register: rev_after
+      changed_when: false
+
+    - name: Ergebnis melden
+      ansible.builtin.debug:
+        msg: >-
+          {{ (rev_before.stdout == rev_after.stdout)
+             | ternary('Keine Aenderungen, Stand bleibt ' ~ rev_after.stdout,
+                       'Aktualisiert: ' ~ rev_before.stdout ~ ' -> ' ~ rev_after.stdout) }}
+
+    - name: Dateien im Ordner auflisten
+      ansible.builtin.command: "ls -1 {{ repo_dir }}"
+      register: dir_listing
+      changed_when: false
+
+    - name: Inhalt melden
+      ansible.builtin.debug:
+        var: dir_listing.stdout_lines
