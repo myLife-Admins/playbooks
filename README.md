@@ -148,10 +148,41 @@ Hinweis von winget: 1 Pakete verfügen über Pins, die ein Upgrade verhindern. �
 | `fehlgeschlagen` | jeder andere Code; die letzten fünf Zeilen der winget-Ausgabe stehen dabei |
 | `uebersprungen` | ID in der Liste abgeschnitten (`…`), nicht eindeutig aufrufbar |
 
-Ein fehlgeschlagenes Paket macht den Lauf rot, nachdem der Bericht
-ausgegeben ist — die übrigen werden trotzdem versucht. Alle Ergebnisse liegen
-zusätzlich strukturiert in `winget_run.result.packages` (Name, ID, Versionen,
-Status, Code, Hinweis); daraus wird später das Protokoll geschrieben.
+Probleme brechen einen Host nicht ab, sondern werden gesammelt: ein
+fehlgeschlagenes Paket, ein nicht erreichbarer Host, fehlendes winget, ein
+Nicht-Windows-Host im Inventory. Rot wird der Lauf erst ganz am Ende, nach dem
+Mailversand — sonst käme die Mail ausgerechnet dann nicht, wenn etwas
+schiefgeht. Alle Ergebnisse liegen zusätzlich strukturiert in
+`winget_run.result.packages` (Name, ID, Versionen, Status, Code, Hinweis);
+daraus wird später das Protokoll geschrieben.
+
+**Bericht per Mail.** Ein zweites Play sammelt die Berichte aller Hosts und
+schickt sie als eine Mail, sofern `mail_to` gesetzt ist. Am bequemsten als
+Variablengruppe in Semaphore, dann für jedes Template wiederverwendbar:
+
+```json
+{
+  "mail_host": "smtp.example.local",
+  "mail_to": "it@example.de",
+  "mail_from": "semaphore@example.de"
+}
+```
+
+Optional `mail_port` (Standard 25), `mail_secure` (Standard `try`),
+`mail_username` und `mail_password` — Letzteres als Secret der Variablengruppe,
+nicht im Klartext. Ohne `mail_from` ist der Empfänger zugleich Absender.
+
+Der Betreff fasst zusammen, der Text enthält die Berichte pro Host:
+
+```
+[winget] 2 Host(s): 2 aktualisiert, 1 fehlgeschlagen - 2 mit Problem
+```
+
+Gesendet wird aus dem Semaphore-Container. SMTP geht nicht über den Proxy,
+der Container braucht also direkten Zugang zum Mailserver auf Port 25. Und der
+Mailserver muss Mails von der IP des Docker-Hosts annehmen: Exchange-Relays
+lassen anonymes Senden meist nur von freigegebenen Adressen zu. Scheitert
+STARTTLS am Zertifikat des internen Servers, `mail_secure: never` setzen.
 
 Die Tabelle von `winget upgrade` wird über die Positionen der Überschriften
 gelesen, nicht über deren Text. Mit `--source` hat sie vier Spalten (Name, ID,

@@ -13,6 +13,11 @@
 # Die Ergebnisse liegen strukturiert in winget_run.result.packages und sind
 # die Grundlage fuer ein spaeteres Protokoll.
 #
+# Am Ende geht der Bericht aller Hosts per Mail raus, sofern mail_to gesetzt
+# ist (zweites Play). Probleme brechen die Hosts deshalb nicht ab, sondern
+# werden gesammelt - rot wird der Lauf erst nach dem Versand. Sonst kaeme
+# die Mail ausgerechnet dann nicht, wenn etwas schiefgeht.
+#
 # Warum als SYSTEM: winget ist eine App-Paket-Anwendung (App Installer). In
 # einer WinRM-Sitzung fehlt der Aufruf-Alias 'winget', und den Ordner unter
 # C:\Program Files\WindowsApps darf nicht einmal ein Administrator auflisten.
@@ -39,15 +44,14 @@
     winget_source: winget
 
   tasks:
-    - name: Nur WinRM-Hosts behandeln
-      ansible.builtin.assert:
-        that: (ansible_connection | default('ssh')) in ['winrm', 'psrp']
-        fail_msg: >-
-          {{ inventory_hostname }} ist kein Windows-Host
-          (ansible_connection={{ ansible_connection | default('ssh') }}).
-          Im Inventory ansible_connection=winrm setzen oder den Host ueber
-          target_hosts ausschliessen.
-        quiet: true
+    # Fuer den Bericht im zweiten Play: welche Hosts dieser Lauf hatte,
+    # auch die, die unterwegs scheitern oder nicht erreichbar sind.
+    - name: Hosts dieses Laufs merken
+      ansible.builtin.set_fact:
+        winget_play_hosts: "{{ ansible_play_hosts_all }}"
+      delegate_to: localhost
+      delegate_facts: true
+      run_once: true
 
     - name: winget als SYSTEM aufrufen
       become: true
@@ -257,43 +261,168 @@
           }
           $Ansible.Changed = $counts.aktualisiert -gt 0
       register: winget_run
+      when: (ansible_connection | default('ssh')) in ['winrm', 'psrp']
+      # Fehler und Unerreichbarkeit werden unten zu einem Problem pro Host.
+      # So laeuft jeder Host bis zum Bericht durch.
+      ignore_errors: true
+      ignore_unreachable: true
 
-    - name: Abbrechen, wenn winget fehlt
-      ansible.builtin.fail:
-        msg: >-
-          winget ist auf {{ inventory_hostname }} nicht installiert.
-          Server 2022 braucht den App Installer von Hand, Server 2019 kann
-          winget gar nicht.
-      when: not winget_run.result.found
+    # Leerer Text = kein Problem. Die Reihenfolge entspricht der Frage
+    # "wo ist es zuerst schiefgegangen".
+    - name: Probleme festhalten
+      ansible.builtin.set_fact:
+        winget_problem: >-
+          {%- if (ansible_connection | default('ssh')) not in ['winrm', 'psrp'] -%}
+          kein Windows-Host (ansible_connection={{ ansible_connection | default('ssh') }}) -
+          im Inventory ansible_connection=winrm setzen
+          {%- elif winget_run.unreachable | default(false) -%}
+          nicht erreichbar: {{ winget_run.msg | default('') }}
+          {%- elif winget_run.failed | default(false) -%}
+          winget-Aufruf gescheitert: {{ winget_run.msg | default('') }}
+          {%- elif not (winget_run.result.found | default(false)) -%}
+          winget nicht installiert - Server 2022 braucht den App Installer
+          von Hand, Server 2019 kann winget gar nicht
+          {%- elif not (winget_run.result.listing_ok | default(false)) -%}
+          winget konnte die Liste nicht abrufen (Code
+          {{ winget_run.result.listing_rc | default('?') }})
+          {%- elif (winget_run.result.counts.fehlgeschlagen | default(0) | int) > 0 -%}
+          {{ winget_run.result.counts.fehlgeschlagen }} Update(s) fehlgeschlagen
+          {%- endif -%}
+
+    - name: Problem anzeigen
+      ansible.builtin.debug:
+        msg: "PROBLEM: {{ winget_problem }}"
+      when: winget_problem | length > 0
 
     - name: Bericht
       ansible.builtin.debug:
         var: winget_run.result.report
+      when: winget_run.result.report is defined
 
     # Leere Liste kann "alles aktuell" heissen oder eine Tabelle, die nicht
     # erkannt wurde - die Rohausgabe zeigt, welches von beiden.
     - name: Rohausgabe der Liste, wenn keine Pakete erkannt wurden
       ansible.builtin.debug:
         var: winget_run.result.raw
-      when: winget_run.result.packages | length == 0
+      when:
+        - winget_run.result.raw is defined
+        - winget_run.result.packages | default([]) | length == 0
 
     - name: Ausgabe der fehlgeschlagenen Updates
       ansible.builtin.debug:
         msg: "{{ item.output }}"
-      loop: "{{ winget_run.result.packages | selectattr('status', 'equalto', 'fehlgeschlagen') | list }}"
+      loop: "{{ winget_run.result.packages | default([]) | selectattr('status', 'equalto', 'fehlgeschlagen') | list }}"
       loop_control:
         label: "{{ item.id }}"
 
-    - name: Abbrechen, wenn die Liste nicht abgerufen werden konnte
-      ansible.builtin.fail:
-        msg: >-
-          winget konnte die Liste nicht abrufen (Code
-          {{ winget_run.result.listing_rc }}). Rohausgabe darueber.
-      when: not winget_run.result.listing_ok
 
-    - name: Abbrechen, wenn Updates fehlgeschlagen sind
+# Zweites Play: Bericht aller Hosts einsammeln, per Mail verschicken und erst
+# dann den Lauf scheitern lassen, wenn es irgendwo ein Problem gab.
+#
+# Mail geht nur raus, wenn mail_to gesetzt ist. Am bequemsten als
+# Variablengruppe in Semaphore (Extra-Variablen):
+#   {"mail_host": "smtp.example.local", "mail_to": "it@example.de",
+#    "mail_from": "semaphore@example.de"}
+# Optional: mail_port (25), mail_secure (try), mail_username, mail_password.
+# Ohne mail_from ist der Empfaenger zugleich Absender - das nehmen interne
+# Relays meist an.
+- name: Bericht verschicken
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+    winget_hosts: "{{ winget_play_hosts | default([]) }}"
+
+  tasks:
+    - name: Ergebnisse aller Hosts einsammeln
+      ansible.builtin.set_fact:
+        winget_results: >-
+          {{ winget_results | default([]) + [{
+               'host': item,
+               'problem': hostvars[item].winget_problem
+                          if hostvars[item].winget_problem is defined
+                          else 'kein Ergebnis - Host hat den Lauf nicht erreicht',
+               'mode': hostvars[item].winget_run.result.mode | default('-'),
+               'counts': hostvars[item].winget_run.result.counts | default({}),
+               'report': hostvars[item].winget_run.result.report | default([])
+             }] }}
+      loop: "{{ winget_hosts }}"
+
+    - name: Betreff und Text zusammenstellen
+      ansible.builtin.set_fact:
+        winget_mail_subject: >-
+          {%- set results = winget_results | default([]) -%}
+          {%- set counts = results | map(attribute='counts') | list -%}
+          {%- set ok = counts | map(attribute='aktualisiert', default=0) | map('int') | sum -%}
+          {%- set failed = counts | map(attribute='fehlgeschlagen', default=0) | map('int') | sum -%}
+          {%- set pending = counts | map(attribute='anstehend', default=0) | map('int') | sum -%}
+          {%- set problems = results | selectattr('problem') | list | length -%}
+          {%- set totals = [
+                ((ok ~ ' aktualisiert') if ok else ''),
+                ((failed ~ ' fehlgeschlagen') if failed else ''),
+                ((pending ~ ' anstehend') if pending else '')
+              ] | select | join(', ') -%}
+          {%- if results | length == 0 -%}
+          [winget] kein Host getroffen - Inventory pruefen
+          {%- else -%}
+          [winget] {{ results | length }} Host(s): {{ totals or 'nichts anstehend' }}
+          {%- if problems %} - {{ problems }} mit Problem{% endif -%}
+          {%- endif -%}
+        winget_mail_body: |
+          winget-Bericht aus Semaphore
+          {% for r in winget_results | default([]) %}
+
+          === {{ r.host }} ({{ {'list': 'nur Liste', 'upgrade': 'Aktualisierung'}[r.mode] | default('kein Lauf') }}) ===
+          {% if r.problem %}
+          PROBLEM: {{ r.problem }}
+          {% endif %}
+          {% for line in r.report %}
+          {{ line }}
+          {% endfor %}
+          {% endfor %}
+
+    - name: Betreff anzeigen
+      ansible.builtin.debug:
+        msg: "{{ winget_mail_subject }}"
+
+    - name: Mail-Einstellungen pruefen
+      ansible.builtin.assert:
+        that: mail_host is defined
+        fail_msg: mail_to ist gesetzt, aber mail_host fehlt.
+        quiet: true
+      when: mail_to is defined
+
+    - name: Bericht per Mail verschicken
+      community.general.mail:
+        host: "{{ mail_host }}"
+        port: "{{ mail_port | default(25) | int }}"
+        secure: "{{ mail_secure | default('try') }}"
+        username: "{{ mail_username | default(omit) }}"
+        password: "{{ mail_password | default(omit) }}"
+        sender: "{{ mail_from | default(mail_to) }}"
+        to: "{{ mail_to }}"
+        subject: "{{ winget_mail_subject }}"
+        body: "{{ winget_mail_body }}"
+        charset: utf-8
+      when: mail_to is defined
+
+    - name: Hinweis, wenn keine Mail verschickt wurde
+      ansible.builtin.debug:
+        msg: Keine Mail - mail_to ist nicht gesetzt.
+      when: mail_to is not defined
+
+    - name: Lauf scheitern lassen, wenn kein Host getroffen wurde
       ansible.builtin.fail:
         msg: >-
-          {{ winget_run.result.counts.fehlgeschlagen }} Update(s)
-          fehlgeschlagen - Einzelheiten im Bericht darueber.
-      when: (winget_run.result.counts.fehlgeschlagen | int) > 0
+          Das Muster '{{ target_hosts | default('all') }}' hat keinen Host
+          getroffen - Inventory oder target_hosts pruefen.
+      when: winget_hosts | length == 0
+
+    - name: Lauf scheitern lassen, wenn es Probleme gab
+      ansible.builtin.fail:
+        msg: >-
+          Probleme auf {{ problem_hosts | join(', ') }} - Einzelheiten im
+          Bericht darueber und in der Mail.
+      vars:
+        problem_hosts: "{{ winget_results | default([]) | selectattr('problem') | map(attribute='host') | list }}"
+      when: problem_hosts | length > 0
