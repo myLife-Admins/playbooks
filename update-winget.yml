@@ -1,0 +1,134 @@
+---
+# Aktualisiert per winget installierte Programme auf Windows-Hosts.
+#
+# Standardmaessig wird nur gelistet, was anstuende (winget_dry_run: true).
+# Erst mit
+#   Extra-Var  winget_dry_run=false
+# laeuft 'winget upgrade --all'. Rebootet wird nie.
+#
+# Warum als SYSTEM: winget ist eine App-Paket-Anwendung (App Installer). In
+# einer WinRM-Sitzung fehlt der Aufruf-Alias 'winget', und den Ordner unter
+# C:\Program Files\WindowsApps darf nicht einmal ein Administrator auflisten.
+# SYSTEM darf das - deshalb become SYSTEM und Aufruf ueber den vollen Pfad.
+#
+# Voraussetzungen am Zielhost:
+#   - winget vorhanden: Windows 10/11 und Server 2025 ja, Server 2022 nur mit
+#     nachinstalliertem App Installer, Server 2019 gar nicht
+#   - Internetzugang. Als SYSTEM gelten die Proxy-Einstellungen angemeldeter
+#     Benutzer nicht.
+#
+# Inventory: Hosts als FQDN eintragen (infra04.gutingia.local). WinRM laeuft
+# ueber 'requests' und damit ueber den Proxy, sobald der Name nicht unter
+# NO_PROXY faellt - ein Kurzname landet am Proxy statt am Server.
+
+- name: Windows - winget upgrade
+  hosts: "{{ target_hosts | default('all') }}"
+  gather_facts: false
+
+  vars:
+    winget_dry_run: true
+    # Nur das Community-Repository. Die Store-Quelle braucht Store-Zugang
+    # und scheitert auf Servern.
+    winget_source: winget
+
+  tasks:
+    - name: Nur WinRM-Hosts behandeln
+      ansible.builtin.assert:
+        that: (ansible_connection | default('ssh')) in ['winrm', 'psrp']
+        fail_msg: >-
+          {{ inventory_hostname }} ist kein Windows-Host
+          (ansible_connection={{ ansible_connection | default('ssh') }}).
+          Im Inventory ansible_connection=winrm setzen oder den Host ueber
+          target_hosts ausschliessen.
+        quiet: true
+
+    - name: winget als SYSTEM aufrufen
+      become: true
+      become_method: runas
+      become_user: SYSTEM
+      ansible.windows.win_powershell:
+        # Als Text statt als bool uebergeben: ein [bool]-Parameter in
+        # PowerShell macht aus dem Text "False" ein $true.
+        parameters:
+          Mode: "{{ 'list' if (winget_dry_run | bool) else 'upgrade' }}"
+          Source: "{{ winget_source }}"
+        script: |
+          [CmdletBinding()]
+          param (
+              [ValidateSet('list', 'upgrade')]
+              [string]$Mode,
+              [string]$Source
+          )
+          # Bewusst nicht 'Stop': PowerShell 5.1 bricht sonst bei der ersten
+          # Zeile auf stderr eines externen Programms ab.
+          $ErrorActionPreference = 'Continue'
+          # Ohne Konsole (WinRM) kann das Setzen scheitern - dann eben ohne.
+          try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
+
+          # Neueste installierte Version suchen. Der Ordnername enthaelt sie:
+          # Microsoft.DesktopAppInstaller_<version>_x64__8wekyb3d8bbwe
+          $winget = Get-ChildItem -Path "$env:ProgramFiles\WindowsApps" -Directory `
+                  -Filter 'Microsoft.DesktopAppInstaller_*_x64__8wekyb3d8bbwe' -ErrorAction SilentlyContinue |
+              Sort-Object { [version](($_.Name -split '_')[1]) } -Descending |
+              ForEach-Object { Join-Path $_.FullName 'winget.exe' } |
+              Where-Object { Test-Path $_ } |
+              Select-Object -First 1
+
+          if (-not $winget) {
+              $Ansible.Result = @{ found = $false }
+              return
+          }
+
+          $common = @('--source', $Source, '--accept-source-agreements', '--disable-interactivity')
+          if ($Mode -eq 'list') {
+              $wingetArgs = @('upgrade') + $common
+          } else {
+              $wingetArgs = @('upgrade', '--all', '--silent', '--accept-package-agreements') + $common
+          }
+
+          $raw = & $winget @wingetArgs 2>&1 | Out-String
+          $rc = $LASTEXITCODE
+
+          # Fortschrittsbalken und Spinner herausfiltern. winget zeichnet sie
+          # per Wagenruecklauf neu - pro Zeile zaehlt nur der letzte Stand.
+          $lines = $raw -split "`n" |
+              ForEach-Object { ($_ -split "`r")[-1].TrimEnd() } |
+              Where-Object { $_ -notmatch '^\s*[-\\|/]?\s*$' -and $_ -notmatch '[\u2580-\u259F]' }
+
+          $Ansible.Result = @{
+              found  = $true
+              winget = $winget
+              rc     = $rc
+              # @($null) waere eine Liste mit einem leeren Eintrag
+              lines  = @(if ($lines) { $lines })
+          }
+          # Naeherung: winget meldet nicht sprachunabhaengig, ob wirklich
+          # etwas installiert wurde.
+          $Ansible.Changed = ($Mode -eq 'upgrade') -and ($rc -eq 0)
+      register: winget_run
+
+    - name: Abbrechen, wenn winget fehlt
+      ansible.builtin.fail:
+        msg: >-
+          winget ist auf {{ inventory_hostname }} nicht installiert.
+          Server 2022 braucht den App Installer von Hand, Server 2019 kann
+          winget gar nicht.
+      when: not winget_run.result.found
+
+    - name: Ausgabe von winget
+      ansible.builtin.debug:
+        var: winget_run.result.lines
+
+    # 0x8A15002B = "kein anwendbares Update gefunden" - kein Fehler.
+    - name: Abbrechen bei Fehler
+      ansible.builtin.fail:
+        msg: >-
+          winget endete mit Code {{ winget_run.result.rc }}
+          ({{ '0x%08X' | format(winget_run.result.rc % 4294967296) }}).
+          {{ winget_hints[winget_run.result.rc] | default('Details in der Ausgabe darueber.') }}
+      vars:
+        winget_hints:
+          -1073741515: >-
+            Eine DLL fehlt - meist die VC++-Laufzeit, die der App Installer
+            braucht.
+      when: winget_run.result.rc not in [0, -1978335189]

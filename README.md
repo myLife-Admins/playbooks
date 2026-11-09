@@ -4,7 +4,8 @@ Patch-Playbooks für die monatlichen Serverupdates, betrieben über Semaphore.
 
 ## Stand dieses Branches
 
-`stable` enthält derzeit nur `update-apt.yml`. Der Commit `clear` (1092d36) hat
+`stable` enthält derzeit `update-apt.yml`, `update-winget.yml` und
+`pull-playbooks.yml`. Der Commit `clear` (1092d36) hat
 den übrigen Bestand entfernt: `ansible.cfg`, `inventory/`, `requirements.yml`
 und beide Produktions-Playbooks samt `tasks/`. Verloren ist davon nichts, der
 Stand davor liegt in `482ad68` und lässt sich gezielt zurückholen:
@@ -93,6 +94,10 @@ nötiger Reboot wird gemeldet statt ausgeführt. Für den echten Lauf:
 ansible-playbook update-apt.yml -e apt_dry_run=false
 ```
 
+Im Playbook wird der Schalter überall mit `| bool` ausgewertet. Per `-e` oder
+Survey kommt er als Text an, und der Text `"false"` ist für Ansible wahr —
+ohne den Filter würde das Upgrade stillschweigend übersprungen.
+
 Ablauf: Debian/Ubuntu prüfen → Paketlisten aktualisieren → anstehende Updates
 per `check_mode` ermitteln → Upgrade (nur ohne dry run) →
 `/var/run/reboot-required` prüfen → Zusammenfassung.
@@ -109,6 +114,62 @@ Warum `all` und nicht `linux_server`: heißt die Gruppe in der Inventory
 irgendwann anders, matcht ein fester Gruppenname nichts, und Ansible quittiert
 das mit „skipping: no hosts matched" und Exit-Code 0 — ein Lauf, der nichts tut
 und trotzdem grün aussieht.
+
+### `update-winget.yml` — Windows / winget
+
+Aktualisiert alle Programme, die winget kennt. Wie bei `update-apt.yml` wird
+standardmäßig nur gelistet, was anstünde. Für den echten Lauf:
+
+```bash
+ansible-playbook update-winget.yml -e winget_dry_run=false
+```
+
+Rebootet wird nie. Quelle ist nur das Community-Repository `winget` — die
+Store-Quelle braucht Store-Zugang und scheitert auf Servern.
+
+**Warum als SYSTEM.** winget ist eine App-Paket-Anwendung (App Installer). In
+einer WinRM-Sitzung fehlt der Aufruf-Alias `winget`, und den Ordner
+`C:\Program Files\WindowsApps`, in dem die `winget.exe` liegt, darf nicht
+einmal ein Administrator auflisten. SYSTEM darf das. Das Playbook wechselt
+deshalb per `become_method: runas` zu SYSTEM — ohne Passwort, das braucht es
+für SYSTEM nicht — und ruft die neueste installierte `winget.exe` über den
+vollen Pfad auf.
+
+Voraussetzungen am Zielhost:
+
+- **winget vorhanden.** Windows 10/11 und Server 2025 ja, Server 2022 nur mit
+  nachinstalliertem App Installer, Server 2019 gar nicht. Fehlt es, bricht
+  das Playbook mit genau dieser Meldung ab.
+- **Internetzugang.** Als SYSTEM gelten die Proxy-Einstellungen angemeldeter
+  Benutzer nicht. Kommt winget nicht an seine Quelle, ist das der erste Verdacht.
+
+Inventory — der Host als **FQDN**. WinRM geht über `requests` und damit über
+den Proxy, sobald der Name nicht unter `NO_PROXY` fällt (siehe [Proxy](#proxy)).
+Ein Kurzname wie `infra04` landet beim Proxy statt beim Server:
+
+```
+[windows]
+infra04.gutingia.local
+
+[windows:vars]
+ansible_connection=winrm
+ansible_winrm_transport=ntlm
+ansible_port=5985
+ansible_winrm_server_cert_validation=ignore
+```
+
+Zugangsdaten für einen Testhost am einfachsten als „Login with Password" im
+Key Store, als User Credentials ans Inventory gehängt — Benutzer als
+`GUTINGIA\name` oder `name@gutingia.local`. Sudo Credentials leer lassen. Für
+mehrere Hosts mit unterschiedlichen Konten siehe [Zugangsdaten](#zugangsdaten).
+
+Das winget-eigene Protokoll eines Laufs als SYSTEM liegt auf dem Zielhost unter
+`C:\Windows\System32\config\systemprofile\AppData\Local\Packages\Microsoft.DesktopAppInstaller_8wekyb3d8bbwe\LocalState\DiagOutputDir`.
+
+Grenzen: `changed` ist eine Näherung, weil winget nicht sprachunabhängig meldet,
+ob tatsächlich etwas installiert wurde. Exit-Code `0x8A15002B` („kein
+anwendbares Update") gilt nicht als Fehler, eine fehlende DLL
+(`0xC0000135`, meist die VC++-Laufzeit) bekommt einen eigenen Hinweis.
 
 ### `update-windows-server.yml` — Windows
 
@@ -533,7 +594,9 @@ Nachbetrachtung, aber nicht im Semaphore-Log sichtbar.
 Im Branch:
 
 ```
-update-apt.yml                  Linux-Patchlauf, Pfad des Semaphore-Templates
+update-apt.yml                  Linux-Programme (apt), dry run als Standard
+update-winget.yml               Windows-Programme (winget), dry run als Standard
+pull-playbooks.yml              git pull im Playbook-Ordner
 README.md
 .gitignore
 ```
