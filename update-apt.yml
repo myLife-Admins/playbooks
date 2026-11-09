@@ -17,6 +17,8 @@
 
   vars:
     apt_dry_run: true
+    # Immer mit "| bool" auswerten: per -e oder Survey kommt der Wert als Text
+    # an, und der Text "false" ist fuer Ansible wahr.
 
   tasks:
     - name: Nur Debian/Ubuntu behandeln
@@ -53,7 +55,7 @@
     - name: Upgrade durchfuehren
       ansible.builtin.apt:
         upgrade: dist
-      when: not apt_dry_run
+      when: not (apt_dry_run | bool)
 
     - name: Pruefen, ob ein Reboot noetig waere
       ansible.builtin.stat:
@@ -63,7 +65,7 @@
     - name: Ergebnis zusammenfassen
       ansible.builtin.debug:
         msg: >-
-          Modus: {{ apt_dry_run | ternary('Simulation (nichts geaendert)',
+          Modus: {{ (apt_dry_run | bool) | ternary('Simulation (nichts geaendert)',
           'Upgrade ausgefuehrt') }} |
           Reboot noetig: {{ reboot_required_file.stat.exists | ternary('ja', 'nein') }}
-          {{ apt_dry_run | ternary('(Dieser Testlauf rebootet grundsaetzlich nicht.)', '') }}
+          {{ (apt_dry_run | bool) | ternary('(Dieser Testlauf rebootet grundsaetzlich nicht.)', '') }}
