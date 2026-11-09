@@ -223,20 +223,35 @@ anlegen **und Versionen festnageln**, sonst handelt man sich die Drift wieder ei
 ### Proxy
 
 Der Container kommt nur über den Proxy nach draußen — Git, Galaxy und alles
-weitere. Die Variablen gehören an den Container, damit sie sowohl einen
-etwaigen Galaxy-Schritt als auch das Playbook erreichen:
+weitere. Die Variablen am Container zu setzen reicht dafür **nicht**:
+Semaphore gibt seine eigene Umgebung nicht an Tasks weiter. Welche Variablen
+durchgereicht werden, muss man ausdrücklich mit `SEMAPHORE_FORWARDED_ENV_VARS`
+festlegen:
 
 ```yaml
 services:
   semaphore:
     environment:
-      HTTP_PROXY: http://proxy:8080
-      HTTPS_PROXY: http://proxy:8080
-      NO_PROXY: localhost,127.0.0.1,gutingia.local,.gutingia.local
-      http_proxy: http://proxy:8080
-      https_proxy: http://proxy:8080
-      no_proxy: localhost,127.0.0.1,gutingia.local,.gutingia.local
+      HTTP_PROXY: http://10.98.98.222:8080
+      HTTPS_PROXY: http://10.98.98.222:8080
+      NO_PROXY: localhost,127.0.0.1,db,gutingia.local,.gutingia.local
+      http_proxy: http://10.98.98.222:8080
+      https_proxy: http://10.98.98.222:8080
+      no_proxy: localhost,127.0.0.1,db,gutingia.local,.gutingia.local
+      SEMAPHORE_FORWARDED_ENV_VARS: '["HTTP_PROXY","HTTPS_PROXY","NO_PROXY","http_proxy","https_proxy","no_proxy"]'
 ```
+
+Die Falle dabei: ein Test per `docker exec semaphore …` sieht die Variablen,
+weil er direkt in der Container-Umgebung läuft — ein Task sieht sie ohne
+`SEMAPHORE_FORWARDED_ENV_VARS` nicht. Das Symptom im Task-Log ist ein direkter
+Verbindungsversuch, den die Firewall nach gut zwei Minuten verwirft:
+
+```
+Failed to connect to github.com port 443 after 134101 ms: Could not connect to server
+```
+
+Der Proxy steht als IP drin, damit er nicht von der DNS-Konfiguration des
+Containers abhängt.
 
 Beide Schreibweisen sind kein Versehen: `ansible-galaxy` liest die Umgebung
 über urllib, `pywinrm` und `vmware.vmware` über `requests` — die werten Groß-
