@@ -271,7 +271,11 @@
     # "wo ist es zuerst schiefgegangen".
     - name: Probleme festhalten
       ansible.builtin.set_fact:
-        winget_problem: >-
+        # Eine Vorlage ganz ohne Ausgabe ergibt seit ansible-core 2.19 None
+        # statt eines leeren Texts - deshalb der Umweg ueber default('', true).
+        winget_problem: "{{ winget_problem_text | default('', true) | trim }}"
+      vars:
+        winget_problem_text: >-
           {%- if (ansible_connection | default('ssh')) not in ['winrm', 'psrp'] -%}
           kein Windows-Host (ansible_connection={{ ansible_connection | default('ssh') }}) -
           im Inventory ansible_connection=winrm setzen
