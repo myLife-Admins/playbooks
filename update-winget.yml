@@ -1,10 +1,17 @@
 ---
-# Aktualisiert per winget installierte Programme auf Windows-Hosts.
+# Aktualisiert per winget installierte Programme auf Windows-Hosts und
+# berichtet pro Paket, was anstand, was geklappt hat und was nicht.
 #
-# Standardmaessig wird nur gelistet, was anstuende (winget_dry_run: true).
-# Erst mit
+# Standardmaessig wird nur gelistet (winget_dry_run: true). Erst mit
 #   Extra-Var  winget_dry_run=false
-# laeuft 'winget upgrade --all'. Rebootet wird nie.
+# wird aktualisiert. Rebootet wird nie.
+#
+# Ablauf: 'winget upgrade' listet die anstehenden Pakete, danach wird jedes
+# einzeln mit 'winget upgrade --id <id> --exact' aktualisiert. Das ergibt
+# dasselbe wie '--all', aber mit einem Exit-Code pro Paket - und damit einem
+# Erfolgsstatus, der nicht davon abhaengt, in welcher Sprache winget redet.
+# Die Ergebnisse liegen strukturiert in winget_run.result.packages und sind
+# die Grundlage fuer ein spaeteres Protokoll.
 #
 # Warum als SYSTEM: winget ist eine App-Paket-Anwendung (App Installer). In
 # einer WinRM-Sitzung fehlt der Aufruf-Alias 'winget', und den Ordner unter
@@ -47,6 +54,9 @@
       become_method: runas
       become_user: SYSTEM
       ansible.windows.win_powershell:
+        # Standard waere 2 - die Paketliste liegt tiefer und kaeme sonst als
+        # Text statt als Struktur zurueck.
+        depth: 5
         # Als Text statt als bool uebergeben: ein [bool]-Parameter in
         # PowerShell macht aus dem Text "False" ein $true.
         parameters:
@@ -79,32 +89,173 @@
               return
           }
 
+          # Erfolg ist nur Code 0, "nicht anwendbar" nur 0x8A15002B. Alles
+          # andere ist ein Fehler - der Text hier ist nur ein Hinweis dazu.
+          $hints = @{
+              '0x8A150014' = 'kein passendes Paket gefunden'
+              '0x8A15002B' = 'kein anwendbares Update'
+              '0x8A150101' = 'Programm laeuft gerade'
+              '0x8A150109' = 'Neustart noetig, um die Installation abzuschliessen'
+              '0xC0000135' = 'DLL fehlt, meist die VC++-Laufzeit des App Installers'
+          }
           $common = @('--source', $Source, '--accept-source-agreements', '--disable-interactivity')
-          if ($Mode -eq 'list') {
-              $wingetArgs = @('upgrade') + $common
-          } else {
-              $wingetArgs = @('upgrade', '--all', '--silent', '--accept-package-agreements') + $common
+
+          function Invoke-Winget {
+              param ([string[]]$Arguments)
+              $out = & $winget @Arguments 2>&1 | ForEach-Object { "$_" }
+              $rc = $LASTEXITCODE
+              # winget zeichnet Fortschritt per Wagenruecklauf neu - pro Zeile
+              # zaehlt der letzte Stand. Spinner und Balken fliegen raus.
+              $lines = $out |
+                  ForEach-Object { $_ -split "`r" | Where-Object { $_.Trim() } | Select-Object -Last 1 } |
+                  Where-Object { $_ -and $_ -notmatch '^\s*[-\\|/]\s*$' -and $_ -notmatch '[\u2580-\u259F]' } |
+                  ForEach-Object { $_.TrimEnd() }
+              [pscustomobject]@{
+                  Rc    = $rc
+                  Hex   = '0x{0:X8}' -f $rc
+                  Lines = @(if ($lines) { $lines })
+              }
           }
 
-          $raw = & $winget @wingetArgs 2>&1 | Out-String
-          $rc = $LASTEXITCODE
+          # Liest die Tabelle von 'winget upgrade'. Die Spaltengrenzen kommen
+          # aus den Positionen der Ueberschriften - deren Text ist je nach
+          # Sprache verschieden, die Reihenfolge nicht: Name, Id, Version,
+          # Verfuegbar und, nur ohne --source, Quelle. Was nach den
+          # Datenzeilen kommt (Summe, Hinweise auf Pins usw.), wird als
+          # Hinweis mitgegeben.
+          function ConvertFrom-WingetTable {
+              param ([string[]]$Lines)
+              $none = [pscustomobject]@{ Parsed = $false; Rows = @(); Notes = @() }
+              $sep = -1
+              for ($i = 1; $i -lt $Lines.Count; $i++) {
+                  if ($Lines[$i] -match '^-{10,}$') { $sep = $i; break }
+              }
+              if ($sep -lt 1) { return $none }
+              $starts = @([regex]::Matches($Lines[$sep - 1], '\S+') | ForEach-Object { $_.Index })
+              # Vier oder fuenf einwortige Ueberschriften erwartet. Alles
+              # andere lieber gar nicht lesen als falsch - dann zeigt die
+              # Rohausgabe, wie die Tabelle aussah.
+              if ($starts.Count -notin 4, 5) { return $none }
+              $rows = @()
+              for ($i = $sep + 1; $i -lt $Lines.Count; $i++) {
+                  $line = $Lines[$i]
+                  # Datenzeile: reicht bis in die letzte Spalte, vor jeder
+                  # Spaltengrenze steht ein Leerzeichen, und die Id ist ein
+                  # einzelnes Wort. Die erste Zeile, auf die das nicht passt,
+                  # ist die Summenzeile darunter.
+                  if ($line.Length -le $starts[-1]) { break }
+                  $aligned = $true
+                  foreach ($s in $starts[1..($starts.Count - 1)]) {
+                      if ($line[$s - 1] -ne ' ') { $aligned = $false }
+                  }
+                  if (-not $aligned) { break }
+                  $cols = for ($c = 0; $c -lt $starts.Count; $c++) {
+                      $from = if ($c -eq 0) { 0 } else { $starts[$c] }
+                      $to = if ($c + 1 -lt $starts.Count) { $starts[$c + 1] } else { $line.Length }
+                      $line.Substring($from, $to - $from).Trim()
+                  }
+                  if ($cols[1] -notmatch '^\S+$') { break }
+                  $rows += [pscustomobject]@{
+                      name      = $cols[0]
+                      id        = $cols[1]
+                      version   = $cols[2]
+                      available = $cols[3]
+                  }
+              }
+              # Achtung: $Lines[$i..($Lines.Count - 1)] liefe bei $i = Count
+              # rueckwaerts und gaebe die letzte Zeile zurueck.
+              $notes = @(if ($i -lt $Lines.Count) { $Lines[$i..($Lines.Count - 1)] | Where-Object { $_.Trim() } })
+              [pscustomobject]@{ Parsed = $true; Rows = $rows; Notes = $notes }
+          }
 
-          # Fortschrittsbalken und Spinner herausfiltern. winget zeichnet sie
-          # per Wagenruecklauf neu - pro Zeile zaehlt nur der letzte Stand.
-          $lines = $raw -split "`n" |
-              ForEach-Object { ($_ -split "`r")[-1].TrimEnd() } |
-              Where-Object { $_ -notmatch '^\s*[-\\|/]?\s*$' -and $_ -notmatch '[\u2580-\u259F]' }
+          $listing = Invoke-Winget -Arguments (@('upgrade') + $common)
+          # 0x8A150014 / 0x8A15002B: nichts gefunden bzw. nichts anwendbar -
+          # beim Listen heisst das schlicht "alles aktuell".
+          $listingOk = $listing.Hex -in @('0x00000000', '0x8A150014', '0x8A15002B')
+          $table = if ($listingOk) { ConvertFrom-WingetTable -Lines $listing.Lines } else { $null }
+          $rows = @(if ($table) { $table.Rows })
+          $notes = @(if ($table) { $table.Notes })
+
+          $packages = @(foreach ($row in $rows) {
+              $entry = [ordered]@{
+                  name      = $row.name
+                  id        = $row.id
+                  version   = $row.version
+                  available = $row.available
+                  status    = 'anstehend'
+                  rc_hex    = $null
+                  hint      = $null
+                  output    = @()
+              }
+              if ($Mode -eq 'upgrade') {
+                  if ($row.id -match '\u2026') {
+                      # winget kuerzt zu lange Spalten mit einem Auslassungszeichen
+                      $entry.status = 'uebersprungen'
+                      $entry.hint = 'Id in der Liste abgeschnitten, nicht eindeutig'
+                  } else {
+                      $r = Invoke-Winget -Arguments (@('upgrade', '--id', $row.id, '--exact', '--silent', '--accept-package-agreements') + $common)
+                      $entry.rc_hex = $r.Hex
+                      $entry.hint = $hints[$r.Hex]
+                      if ($r.Rc -eq 0) {
+                          $entry.status = 'aktualisiert'
+                      } elseif ($r.Hex -eq '0x8A15002B') {
+                          $entry.status = 'nicht anwendbar'
+                      } else {
+                          $entry.status = 'fehlgeschlagen'
+                          $entry.output = @($r.Lines | Select-Object -Last 5)
+                      }
+                  }
+              }
+              [pscustomobject]$entry
+          })
+
+          function Get-StatusCount {
+              param ([string]$Status)
+              @($packages | Where-Object { $_.status -eq $Status }).Count
+          }
+          $counts = [ordered]@{
+              anstehend       = Get-StatusCount 'anstehend'
+              aktualisiert    = Get-StatusCount 'aktualisiert'
+              fehlgeschlagen  = Get-StatusCount 'fehlgeschlagen'
+              nicht_anwendbar = Get-StatusCount 'nicht anwendbar'
+              uebersprungen   = Get-StatusCount 'uebersprungen'
+          }
+
+          $tags = @{
+              'anstehend'       = '[ANSTEHEND]'
+              'aktualisiert'    = '[OK]'
+              'fehlgeschlagen'  = '[FEHLER]'
+              'nicht anwendbar' = '[N/A]'
+              'uebersprungen'   = '[SKIP]'
+          }
+          $report = @()
+          if ($Mode -eq 'list') {
+              $report += '{0} Update(s) anstehend - nur gelistet, nichts installiert' -f $packages.Count
+          } else {
+              $report += 'aktualisiert: {0} | fehlgeschlagen: {1} | nicht anwendbar: {2} | uebersprungen: {3}' -f `
+                  $counts.aktualisiert, $counts.fehlgeschlagen, $counts.nicht_anwendbar, $counts.uebersprungen
+          }
+          foreach ($p in $packages) {
+              $line = '{0,-12} {1,-40} {2} -> {3}' -f $tags[$p.status], $p.id, $p.version, $p.available
+              if ($p.rc_hex -and $p.status -ne 'aktualisiert') { $line += '  ' + $p.rc_hex }
+              if ($p.hint) { $line += '  ' + $p.hint }
+              $report += $line
+          }
+          foreach ($n in $notes) { $report += 'Hinweis von winget: ' + $n.Trim() }
 
           $Ansible.Result = @{
-              found  = $true
-              winget = $winget
-              rc     = $rc
-              # @($null) waere eine Liste mit einem leeren Eintrag
-              lines  = @(if ($lines) { $lines })
+              found      = $true
+              winget     = $winget
+              mode       = $Mode
+              listing_ok = $listingOk
+              listing_rc = $listing.Hex
+              packages   = $packages
+              notes      = $notes
+              counts     = $counts
+              report     = $report
+              raw        = $listing.Lines
           }
-          # Naeherung: winget meldet nicht sprachunabhaengig, ob wirklich
-          # etwas installiert wurde.
-          $Ansible.Changed = ($Mode -eq 'upgrade') -and ($rc -eq 0)
+          $Ansible.Changed = $counts.aktualisiert -gt 0
       register: winget_run
 
     - name: Abbrechen, wenn winget fehlt
@@ -115,20 +266,34 @@
           winget gar nicht.
       when: not winget_run.result.found
 
-    - name: Ausgabe von winget
+    - name: Bericht
       ansible.builtin.debug:
-        var: winget_run.result.lines
+        var: winget_run.result.report
 
-    # 0x8A15002B = "kein anwendbares Update gefunden" - kein Fehler.
-    - name: Abbrechen bei Fehler
+    # Leere Liste kann "alles aktuell" heissen oder eine Tabelle, die nicht
+    # erkannt wurde - die Rohausgabe zeigt, welches von beiden.
+    - name: Rohausgabe der Liste, wenn keine Pakete erkannt wurden
+      ansible.builtin.debug:
+        var: winget_run.result.raw
+      when: winget_run.result.packages | length == 0
+
+    - name: Ausgabe der fehlgeschlagenen Updates
+      ansible.builtin.debug:
+        msg: "{{ item.output }}"
+      loop: "{{ winget_run.result.packages | selectattr('status', 'equalto', 'fehlgeschlagen') | list }}"
+      loop_control:
+        label: "{{ item.id }}"
+
+    - name: Abbrechen, wenn die Liste nicht abgerufen werden konnte
       ansible.builtin.fail:
         msg: >-
-          winget endete mit Code {{ winget_run.result.rc }}
-          ({{ '0x%08X' | format(winget_run.result.rc % 4294967296) }}).
-          {{ winget_hints[winget_run.result.rc] | default('Details in der Ausgabe darueber.') }}
-      vars:
-        winget_hints:
-          -1073741515: >-
-            Eine DLL fehlt - meist die VC++-Laufzeit, die der App Installer
-            braucht.
-      when: winget_run.result.rc not in [0, -1978335189]
+          winget konnte die Liste nicht abrufen (Code
+          {{ winget_run.result.listing_rc }}). Rohausgabe darueber.
+      when: not winget_run.result.listing_ok
+
+    - name: Abbrechen, wenn Updates fehlgeschlagen sind
+      ansible.builtin.fail:
+        msg: >-
+          {{ winget_run.result.counts.fehlgeschlagen }} Update(s)
+          fehlgeschlagen - Einzelheiten im Bericht darueber.
+      when: (winget_run.result.counts.fehlgeschlagen | int) > 0

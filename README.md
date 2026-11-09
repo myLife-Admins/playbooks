@@ -127,6 +127,39 @@ ansible-playbook update-winget.yml -e winget_dry_run=false
 Rebootet wird nie. Quelle ist nur das Community-Repository `winget` — die
 Store-Quelle braucht Store-Zugang und scheitert auf Servern.
 
+**Bericht pro Paket.** Statt `upgrade --all` holt das Playbook erst die Liste
+und aktualisiert dann jedes Paket einzeln mit `--id <id> --exact`. Das ergibt
+dasselbe, aber mit einem Exit-Code pro Paket — und damit einem Status, der
+nicht davon abhängt, in welcher Sprache winget antwortet (als SYSTEM auf einem
+deutschen Server: deutsch). Im Log steht danach etwa:
+
+```
+aktualisiert: 1 | fehlgeschlagen: 1 | nicht anwendbar: 0 | uebersprungen: 0
+[OK]         7zip.7zip                                26.05.00.0 -> 26.06
+[FEHLER]     Mozilla.Firefox.de                       131.0 -> 132.0  0x8A150101  Programm laeuft gerade
+Hinweis von winget: 1 Pakete verfügen über Pins, die ein Upgrade verhindern. …
+```
+
+| Status | Bedeutung |
+|---|---|
+| `anstehend` | nur gelistet (dry run) |
+| `aktualisiert` | Exit-Code 0 |
+| `nicht anwendbar` | `0x8A15002B` — winget fand für dieses System kein passendes Update |
+| `fehlgeschlagen` | jeder andere Code; die letzten fünf Zeilen der winget-Ausgabe stehen dabei |
+| `uebersprungen` | ID in der Liste abgeschnitten (`…`), nicht eindeutig aufrufbar |
+
+Ein fehlgeschlagenes Paket macht den Lauf rot, nachdem der Bericht
+ausgegeben ist — die übrigen werden trotzdem versucht. Alle Ergebnisse liegen
+zusätzlich strukturiert in `winget_run.result.packages` (Name, ID, Versionen,
+Status, Code, Hinweis); daraus wird später das Protokoll geschrieben.
+
+Die Tabelle von `winget upgrade` wird über die Positionen der Überschriften
+gelesen, nicht über deren Text. Mit `--source` hat sie vier Spalten (Name, ID,
+Version, Verfügbar), ohne fünf. Passt das Format nicht, liest das Playbook
+lieber gar nichts als falsch und gibt die Rohausgabe aus. Pins und Pakete mit
+unbekannter Version überspringt winget selbst; das steht als Hinweis im
+Bericht.
+
 **Warum als SYSTEM.** winget ist eine App-Paket-Anwendung (App Installer). In
 einer WinRM-Sitzung fehlt der Aufruf-Alias `winget`, und den Ordner
 `C:\Program Files\WindowsApps`, in dem die `winget.exe` liegt, darf nicht
@@ -166,10 +199,10 @@ mehrere Hosts mit unterschiedlichen Konten siehe [Zugangsdaten](#zugangsdaten).
 Das winget-eigene Protokoll eines Laufs als SYSTEM liegt auf dem Zielhost unter
 `C:\Windows\System32\config\systemprofile\AppData\Local\Packages\Microsoft.DesktopAppInstaller_8wekyb3d8bbwe\LocalState\DiagOutputDir`.
 
-Grenzen: `changed` ist eine Näherung, weil winget nicht sprachunabhängig meldet,
-ob tatsächlich etwas installiert wurde. Exit-Code `0x8A15002B` („kein
-anwendbares Update") gilt nicht als Fehler, eine fehlende DLL
-(`0xC0000135`, meist die VC++-Laufzeit) bekommt einen eigenen Hinweis.
+Für die Codes `0x8A150014`, `0x8A15002B`, `0x8A150101`, `0x8A150109` und
+`0xC0000135` (fehlende DLL, meist die VC++-Laufzeit) steht ein Hinweistext im
+Bericht. Der Text ist nur Erläuterung — ob ein Paket als Erfolg zählt,
+entscheidet allein der Code.
 
 ### `update-windows-server.yml` — Windows
 
