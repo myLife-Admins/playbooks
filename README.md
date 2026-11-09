@@ -55,8 +55,9 @@ abbricht:
 
 - `/playbooks` ist ein **Klon**, keine Kopie der Dateien. Einmalig auf dem Host:
   `git clone https://github.com/myLife-Admins/playbooks.git /opt/docker/semaphore/playbooks`
-- Der Ordner ist für den Container-Benutzer schreibbar. Gehören die Dateien
-  `root`, scheitert der Pull.
+- Der Ordner gehört dem Container-Benutzer (`uid=1001`, `gid=0`). Nach einem
+  `sudo git clone` gehört alles root, und der Pull scheitert:
+  `sudo chown -R 1001:0 /opt/docker/semaphore/playbooks`
 - Die Proxy-Variablen hängen am Container, siehe [Proxy](#proxy).
 
 `safe.directory` gibt das Playbook bei jedem Aufruf mit, statt es global zu
@@ -65,6 +66,15 @@ im Container überlebt `docker compose up -d` nicht.
 
 `--ff-only` ist Absicht: gibt es lokale Änderungen im Ordner, bricht der Pull
 ab, statt sie wegzuräumen oder einen Merge-Commit zu bauen.
+
+Von Hand aktualisieren geht über den Container — dort existiert Benutzer 1001,
+und die Proxy-Variablen sind gesetzt. Auf dem Host gibt es UID 1001 nicht,
+`sudo -u '#1001'` scheitert dort mit „unknown user", und `sudo git` würde die
+Dateien wieder root übereignen:
+
+```bash
+sudo docker exec semaphore git -C /playbooks pull
+```
 
 ### `update-apt.yml` — Linux / APT
 
