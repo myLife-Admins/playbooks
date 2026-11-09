@@ -461,13 +461,37 @@ im Passwort URL-kodieren, `@` also als `%40`.
 | Inventory | Typ **File** mit Pfad `inventory/hosts`, oder statisch in Semaphore gepflegt |
 | Key Store → SSH Key | Eigener ed25519-Key für das Dienstkonto `ansible`, an das Inventory hängen (Linux) |
 | Key Store → Ansible Vault | Das Vault-Passwort, an das Template hängen — damit werden die `vault.yml` entschlüsselt |
-| Environment („Variablengruppen") | Proxy-Variablen, sofern nicht container-weit gesetzt |
-| Task Template → Survey Variable | `target_hosts`, am besten als Dropdown mit den Gruppennamen |
+| Environment („Variablengruppen") | Mail-Einstellungen, Proxy-Variablen sofern nicht container-weit gesetzt |
+| Task Template → Survey Variable | Schalter pro Lauf, siehe [Schalter per Survey](#schalter-per-survey) |
 
 Die Windows-Zugangsdaten hängen bewusst **nicht** als „Login with Password" am
 Inventory — siehe [Zugangsdaten](#zugangsdaten). Semaphore bindet dort ein
 einziges Konto ans ganze Inventory; die lokalen Konten bräuchten dann eigene
 Templates.
+
+### Schalter per Survey
+
+Variablen, die sich von Lauf zu Lauf ändern, gehören nicht ins Playbook und
+nicht in die Variablengruppe, sondern als **Survey-Variable** ins Template
+(„Survey-Variablen" → „+ Variable hinzufügen"). Semaphore fragt sie dann bei
+jedem Start ab, mit einem voreingestellten Wert.
+
+| Variable | Typ | Werte | Standard | Template |
+|---|---|---|---|---|
+| `winget_dry_run` | Auswahl (enum) | `true`, `false` | `true` | `update-winget.yml` |
+| `apt_dry_run` | Auswahl (enum) | `true`, `false` | `true` | `update-apt.yml` |
+| `target_hosts` | Auswahl (enum) | Gruppennamen aus dem Inventory | — | alle |
+
+Standard `true` heißt: Ein versehentlicher Klick listet nur, und „wirklich
+installieren" ist eine bewusste Auswahl.
+
+Semaphore übergibt Survey-Werte als **Text**. Für Ansible ist der Text
+`"false"` wahr — die Playbooks werten die Schalter deshalb überall mit
+`| bool` aus. Wer neue Schalter dieser Art einbaut, muss das genauso machen,
+sonst wird aus „false" stillschweigend „true".
+
+Für zeitgesteuerte Läufe, bei denen niemand etwas auswählt, besser ein eigenes
+Template mit festem CLI-Argument, etwa `--extra-vars=winget_dry_run=false`.
 
 ### Linux-Gruppen im Inventory
 
