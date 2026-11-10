@@ -1,0 +1,49 @@
+---
+# Gemeinsame Einstellungen der Plays in update-windows.yml. Jedes Play laedt
+# die Datei per vars_files, damit die Werte ueberall gleich sind.
+#
+# Per Extra-Var oder Survey ueberschreibbar. NICHT im Inventory - vars_files
+# schlagen Inventory-Variablen. Pro Host Gesteuertes (winupd_manual,
+# winupd_reboot, vm_name, snapshot_required) steht deshalb nicht hier.
+
+# Testlauf: nur suchen und listen
+winupd_dry_run: true
+
+# Hoechstens so viele Snapshots gleichzeitig. Wirkt als 'serial' des
+# Snapshot-Plays und muss deshalb als Extra-Var/Survey kommen - pro Host
+# ergibt es keinen Sinn.
+winupd_snapshot_parallel: 2
+
+# Unter so viel freiem Platz auf C: steht im Protokoll FEHLER
+winupd_min_free_gb: 16
+
+# Runde 0 und hoechstens so viele weitere Runden
+winupd_max_rounds: 4
+
+# Diese Updates kommen in Runde 0 vor allen anderen. Regex auf Titel oder
+# KB-Nummer.
+winupd_first:
+  - Servicing Stack
+  - Wartungsstapel
+  - Wartungsstack
+
+# Kategorien wie bei win_updates (Leerzeichen egal). '*' = alle.
+win_update_categories:
+  - CriticalUpdates
+  - DefinitionUpdates
+  - SecurityUpdates
+  - UpdateRollups
+  - Updates
+
+# --- abgeleitet, nicht aendern ---------------------------------------------
+winupd_first_regex: "{{ winupd_first | join('|') if winupd_first | length > 0 else '(?!)' }}"
+winupd_snapshot_name: "WSU_{{ now(fmt='%Y-%m-%d') }}"
+winupd_short: "{{ inventory_hostname.split('.')[0] | lower }}"
+winupd_is_windows: "{{ (ansible_connection | default('ssh')) in ['winrm', 'psrp'] }}"
+# Host wird gar nicht angefasst
+winupd_skip: "{{ winupd_manual | default(false) | bool or host_offline | default(false) | bool }}"
+# Host wird gepatcht: scharf, keine Vorab-Fehler, Updates oder Neustart stehen an
+winupd_go: >-
+  {{ not (winupd_dry_run | bool) and not (winupd_skip | bool)
+     and winupd_error | default('') | length == 0
+     and winupd_needed | default(false) | bool }}

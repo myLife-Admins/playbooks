@@ -302,7 +302,8 @@ kein Snapshot, keine Installation, kein Neustart. Scharf mit
 Ablauf pro Server:
 
 1. Snapshot `WSU_<Datum>` im vCenter — nur wenn Updates anstehen. Ohne
-   Snapshot keine Updates.
+   Snapshot keine Updates. Höchstens `winupd_snapshot_parallel` (Standard 2)
+   Snapshots laufen gleichzeitig.
 2. Steht schon ein Neustart aus, zuerst neu starten.
 3. **Runde 0:** nur die Updates aus `winupd_first` (Servicing Stack). Die
    müssen vor allem anderen drauf sein, sonst scheitert der Rest.
@@ -321,6 +322,25 @@ am Ende als Liste. Die Vorlage liegt in `templates/windows-update-protocol.j2`.
 
 Zeiten (`Installation gestarted`, `Neustart von … bis …`) sind die Uhrzeit am
 Server, nicht die des Semaphore-Containers.
+
+Das Playbook besteht aus vier Plays: Vorbereitung (alle Server parallel),
+Snapshots (`serial: winupd_snapshot_parallel`), Installation (wieder parallel)
+und Versand. Ein `throttle` am Snapshot-Task reichte nicht: damit würden zwar
+nur zwei Snapshots gleichzeitig *angestoßen*, aber alle, bevor auf den ersten
+gewartet wird. Mit `serial` kommt die nächste Gruppe erst dran, wenn alle
+Snapshots der aktuellen fertig sind.
+
+Einstellungen für den ganzen Lauf stehen in `vars/windows-update.yml` und
+werden per Extra-Var oder Survey überschrieben — nicht im Inventory, dafür
+haben `vars_files` Vorrang:
+
+| Variable | Standard | Wirkung |
+|---|---|---|
+| `winupd_dry_run` | `true` | Testlauf, nur suchen und listen |
+| `winupd_snapshot_parallel` | `2` | höchstens so viele Snapshots gleichzeitig |
+| `winupd_min_free_gb` | `16` | darunter FEHLER bei Festplattenspeicher |
+| `winupd_max_rounds` | `4` | Nachlauf-Runden nach Runde 0 |
+| `winupd_first` | Servicing Stack | Updates, die vor allen anderen kommen |
 
 Variablen pro Host oder Gruppe im Inventory:
 
@@ -814,6 +834,8 @@ tasks/
     create-snapshot.yml         Snapshot ueber vCenter, VM per Name
 templates/
   windows-update-protocol.j2    Protokollblock eines Servers
+vars/
+  windows-update.yml            Einstellungen fuer update-windows.yml
 README.md
 .gitignore
 ```

@@ -31,6 +31,11 @@
 #                           Kurznamen noch dem FQDN des Hosts entspricht
 #   snapshot_required=false Host ohne VM im vCenter (physisch)
 #
+# Einstellungen fuer den ganzen Lauf (Extra-Var/Survey, Standards in
+# vars/windows-update.yml):
+#   winupd_dry_run            Testlauf, Standard true
+#   winupd_snapshot_parallel  hoechstens so viele Snapshots gleichzeitig, Standard 2
+#
 # vCenter - Namen wie im alten update-windows-server.yml (Variablengruppe in
 # Semaphore, Passwort als Secret):
 #   vm_user, vm_password
@@ -40,34 +45,19 @@
 #
 # Mail wie bei update-winget.yml: mail_host, mail_to, optional mail_from usw.
 
-- name: Windows-Updates
+# Vier Plays, damit die Snapshots begrenzt laufen koennen:
+#   1. Vorbereitung   alle Hosts parallel: erreichbar? Stand, Updates suchen
+#   2. Snapshots      serial: hoechstens winupd_snapshot_parallel gleichzeitig
+#   3. Installation   alle Hosts parallel, danach Protokoll pro Host
+#   4. Versand        Mail mit allen Protokollen
+# Ein Fehler in einem Play landet in winupd_error; die folgenden Plays fassen
+# den Host dann nicht mehr an, das Protokoll schreibt Play 3 trotzdem.
+
+- name: Windows-Updates - Vorbereitung
   hosts: "{{ target_hosts | default('all') }}"
   gather_facts: false
-
-  vars:
-    winupd_dry_run: true
-    winupd_min_free_gb: 16
-    # Runde 0 und hoechstens so viele weitere Runden
-    winupd_max_rounds: 4
-    # Diese Updates kommen in Runde 0 vor allen anderen. Regex auf Titel oder
-    # KB-Nummer.
-    winupd_first:
-      - Servicing Stack
-      - Wartungsstapel
-      - Wartungsstack
-    # Kategorien wie bei win_updates (Leerzeichen egal). '*' = alle.
-    win_update_categories:
-      - CriticalUpdates
-      - DefinitionUpdates
-      - SecurityUpdates
-      - UpdateRollups
-      - Updates
-    winupd_first_regex: "{{ winupd_first | join('|') if winupd_first | length > 0 else '(?!)' }}"
-    winupd_snapshot_name: "WSU_{{ now(fmt='%Y-%m-%d') }}"
-    winupd_short: "{{ inventory_hostname.split('.')[0] | lower }}"
-    winupd_vcenter: "{{ vcenter_hostname | default('vcenter1.gutingia.local') }}"
-    winupd_is_windows: "{{ (ansible_connection | default('ssh')) in ['winrm', 'psrp'] }}"
-    winupd_skip: "{{ winupd_manual | default(false) | bool or host_offline | bool }}"
+  vars_files:
+    - vars/windows-update.yml
 
   tasks:
     - name: Hosts dieses Laufs merken
@@ -78,6 +68,7 @@
         host_offline: false
         winupd_error: ''
         winupd_snapshot: ''
+        winupd_needed: false
         winupd_pending: []
         winupd_sizes: {}
         winupd_installed: []
@@ -94,7 +85,7 @@
       ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/common/check-reachable.yml"
       when: not (winupd_manual | default(false) | bool)
 
-    - name: Updates
+    - name: Stand und Updates
       when: not (winupd_skip | bool)
       block:
         - name: Kein Windows-Host
@@ -127,26 +118,55 @@
           ansible.builtin.debug:
             msg: "{{ winupd_pending | map(attribute='title') | list }}"
 
+      rescue:
+        - name: Fehler merken
+          ansible.builtin.set_fact:
+            winupd_error: "{{ ansible_failed_result.msg | default('unbekannter Fehler') }}"
+
+
+# serial wird einmal fuer das ganze Play ausgewertet - deshalb nur aus
+# Extra-Var/Survey oder vars_files, nicht aus dem Inventory. Die naechsten
+# Hosts kommen dran, wenn alle Snapshots der aktuellen Gruppe fertig sind.
+- name: Windows-Updates - Snapshots
+  hosts: "{{ target_hosts | default('all') }}"
+  gather_facts: false
+  vars_files:
+    - vars/windows-update.yml
+  serial: "{{ winupd_snapshot_parallel | int }}"
+
+  tasks:
+    - name: Snapshot
+      when: winupd_go | bool
+      block:
         - name: Snapshot anlegen
           ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/vmware/create-snapshot.yml"
           vars:
             snapshot_name: "{{ winupd_snapshot_name }}"
             snapshot_description: Vor Windows-Updates (Semaphore)
-          when:
-            - not (winupd_dry_run | bool)
-            - winupd_needed | bool
 
         - name: Snapshot merken
           ansible.builtin.set_fact:
             winupd_snapshot: "{{ 'OK' if snapshot_required | default(true) | bool else 'uebersprungen (snapshot_required=false)' }}"
-          when:
-            - not (winupd_dry_run | bool)
-            - winupd_needed | bool
 
+      rescue:
+        - name: Fehler merken
+          ansible.builtin.set_fact:
+            winupd_error: "{{ ansible_failed_result.msg | default('unbekannter Fehler') }}"
+
+
+- name: Windows-Updates - Installation
+  hosts: "{{ target_hosts | default('all') }}"
+  gather_facts: false
+  vars_files:
+    - vars/windows-update.yml
+
+  tasks:
+    - name: Installation
+      when: winupd_go | bool
+      block:
         - name: Ausstehenden Neustart zuerst erledigen
           ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/windows/reboot-logged.yml"
           when:
-            - not (winupd_dry_run | bool)
             - winupd_info_before.pending_reboot | bool
             - winupd_reboot | default(true) | bool
 
@@ -155,9 +175,6 @@
           loop: "{{ range(0, winupd_max_rounds | int + 1) | list }}"
           loop_control:
             loop_var: round_idx
-          when:
-            - not (winupd_dry_run | bool)
-            - winupd_needed | bool
 
       rescue:
         - name: Fehler merken
@@ -219,6 +236,8 @@
 - name: Protokoll verschicken
   hosts: localhost
   gather_facts: false
+  vars_files:
+    - vars/windows-update.yml
 
   vars:
     # Wie in den Protokollen: Leerzeile, Strich, Leerzeile
@@ -249,7 +268,7 @@
           {%- set problems = r | selectattr('problem') | list | length -%}
           {%- set parts = [
                 ((online | map(attribute='installed') | sum) ~ ' Updates installiert')
-                  if not (winupd_dry_run | default(true) | bool) else
+                  if not (winupd_dry_run | bool) else
                 ((online | map(attribute='pending') | sum) ~ ' Updates anstehend (Testlauf)'),
                 ((r | selectattr('manual') | list | length) ~ ' manuell') if r | selectattr('manual') | list else '',
                 ((r | selectattr('offline') | list | length) ~ ' offline') if r | selectattr('offline') | list else ''
