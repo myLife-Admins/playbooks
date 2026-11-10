@@ -63,10 +63,12 @@
     # normal und kein Fehler. Ein kurzer Blick auf den WinRM-Port vorab
     # trennt sie sauber ab - ohne die langen Verbindungsfehler im Log, die
     # ein direkter WinRM-Versuch erzeugt.
+    # Achtung: Bei delegate_to zeigen ansible_host und ansible_port auf den
+    # delegierten Host (localhost) - deshalb ausdruecklich ueber hostvars.
     - name: Erreichbarkeit pruefen
       ansible.builtin.wait_for:
-        host: "{{ ansible_host | default(inventory_hostname) }}"
-        port: "{{ ansible_port | default(5985) | int }}"
+        host: "{{ hostvars[inventory_hostname].ansible_host | default(inventory_hostname) }}"
+        port: "{{ hostvars[inventory_hostname].ansible_port | default(5985) | int }}"
         timeout: "{{ winget_reach_timeout | int }}"
       delegate_to: localhost
       connection: local
@@ -74,10 +76,12 @@
       failed_when: false
       when: (ansible_connection | default('ssh')) in ['winrm', 'psrp']
 
-    # Erfolg liefert 'state', ein Timeout nur 'msg'.
+    # Offline nur bei genau diesem Timeout. Scheitert der Check aus einem
+    # anderen Grund, wird winget trotzdem versucht - ein echter Fehler zeigt
+    # sich dann dort, statt einen erreichbaren Host stumm zu ueberspringen.
     - name: Erreichbarkeit merken
       ansible.builtin.set_fact:
-        winget_offline: "{{ not (winget_reach.skipped | default(false)) and winget_reach.state is not defined }}"
+        winget_offline: "{{ 'Timeout when waiting' in (winget_reach.msg | default('')) }}"
 
     - name: Offline melden
       ansible.builtin.debug:
@@ -503,7 +507,9 @@
           {% if offline_hosts %}
 
           === Offline ({{ offline_hosts | length }}) - ausgeschaltet oder nicht im DNS ===
-          {{ offline_hosts | join(', ') }}
+          {% for h in offline_hosts %}
+            - {{ h }}
+          {% endfor %}
           {% endif %}
 
     - name: Betreff anzeigen
