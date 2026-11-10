@@ -163,14 +163,20 @@ Lauf so da, ist es Letzteres.
 **Gepinnte Pakete.** Pins heißen „nur von Hand aktualisieren", und das
 Playbook fasst sie nicht an. Damit sie trotzdem nicht aus dem Blick geraten,
 stehen die mit verfügbarem Update in einem eigenen Abschnitt. Erkannt werden
-sie auf drei Wegen: am Unterschied zwischen `winget upgrade` und
-`winget upgrade --include-pinned`, an `winget pin list` und an der Variable
-`winget_pin_ids`.
+sie auf vier Wegen: am Unterschied zwischen `winget upgrade` und
+`winget upgrade --include-pinned`, an `winget pin list` (SYSTEM), an den Pins
+**aller Benutzerprofile** am Host und an der Variable `winget_pin_ids`.
 
-Achtung: winget speichert Pins **pro Benutzer**. Ein `winget pin add`, das ein
-Admin interaktiv absetzt, sieht das Playbook (läuft als SYSTEM) nicht — das
-Paket würde trotzdem aktualisiert. Verlässlich ist deshalb die Liste im
-Inventory, pro Host oder Gruppe:
+Hintergrund: winget speichert Pins pro Benutzer in
+`%LOCALAPPDATA%\Packages\Microsoft.DesktopAppInstaller_8wekyb3d8bbwe\LocalState\pinning.db`.
+Das Playbook läuft als SYSTEM und liest diese Datei in jedem Profil (über die
+`winsqlite3.dll`, die Windows ab 10 / Server 2016 mitbringt). Damit gilt:
+Jeder Benutzer pinnt selbst, ganz normal mit `winget pin add --id <id>`, und
+das Paket wird auf diesem Rechner nicht mehr automatisch aktualisiert. Im
+Bericht steht, wer gepinnt hat (`(Pin von adminjs)`). Ist eine Pin-Datei nicht
+lesbar, steht das als Hinweis im Bericht.
+
+Feste Ausnahmen für ganze Gruppen gehen zusätzlich übers Inventory:
 
 ```ini
 [windows_server:vars]

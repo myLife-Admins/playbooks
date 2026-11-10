@@ -235,6 +235,71 @@
               }
           }
 
+          # Pins aller Benutzer: jeder hat eine eigene pinning.db (SQLite) in
+          # seinem Profil. Gelesen wird ueber die winsqlite3.dll, die Windows
+          # ab 10 / Server 2016 mitbringt - an einer Kopie, damit eine offene
+          # winget-Sitzung des Benutzers nicht stoert.
+          # Ergebnis: Paket-Id -> Benutzer, die es gepinnt haben.
+          function Get-ProfilePins {
+              $pins = @{}
+              $errs = @()
+              try {
+                  if (-not ('WgSqlite' -as [type])) {
+                      Add-Type -TypeDefinition @'
+          using System;
+          using System.Runtime.InteropServices;
+          public static class WgSqlite {
+              [DllImport("winsqlite3.dll", CharSet = CharSet.Unicode)]
+              public static extern int sqlite3_open16(string file, out IntPtr db);
+              [DllImport("winsqlite3.dll")]
+              public static extern int sqlite3_close(IntPtr db);
+              [DllImport("winsqlite3.dll", CharSet = CharSet.Unicode)]
+              public static extern int sqlite3_prepare16_v2(IntPtr db, string sql, int len, out IntPtr stmt, IntPtr tail);
+              [DllImport("winsqlite3.dll")]
+              public static extern int sqlite3_step(IntPtr stmt);
+              [DllImport("winsqlite3.dll")]
+              public static extern IntPtr sqlite3_column_text16(IntPtr stmt, int col);
+              [DllImport("winsqlite3.dll")]
+              public static extern int sqlite3_finalize(IntPtr stmt);
+          }
+          '@
+                  }
+              } catch {
+                  return [pscustomobject]@{ Pins = $pins; Errors = @("Benutzer-Pins nicht lesbar: $($_.Exception.Message)") }
+              }
+              $profiles = Get-CimInstance -ClassName Win32_UserProfile -ErrorAction SilentlyContinue |
+                  Where-Object { -not $_.Special -and $_.LocalPath }
+              foreach ($p in $profiles) {
+                  $db = Join-Path $p.LocalPath 'AppData\Local\Packages\Microsoft.DesktopAppInstaller_8wekyb3d8bbwe\LocalState\pinning.db'
+                  if (-not (Test-Path -LiteralPath $db)) { continue }
+                  $user = Split-Path $p.LocalPath -Leaf
+                  $copy = Join-Path $env:TEMP ('pinning_{0}.db' -f [guid]::NewGuid())
+                  try {
+                      Copy-Item -LiteralPath $db -Destination $copy -ErrorAction Stop
+                      $h = [IntPtr]::Zero
+                      $st = [IntPtr]::Zero
+                      if ([WgSqlite]::sqlite3_open16($copy, [ref]$h) -ne 0) { throw 'open' }
+                      try {
+                          if ([WgSqlite]::sqlite3_prepare16_v2($h, 'SELECT package_id FROM pin', -1, [ref]$st, [IntPtr]::Zero) -ne 0) { throw 'prepare' }
+                          # 100 = SQLITE_ROW
+                          while ([WgSqlite]::sqlite3_step($st) -eq 100) {
+                              $id = [Runtime.InteropServices.Marshal]::PtrToStringUni([WgSqlite]::sqlite3_column_text16($st, 0))
+                              if (-not $pins.ContainsKey($id)) { $pins[$id] = @() }
+                              $pins[$id] += $user
+                          }
+                      } finally {
+                          if ($st -ne [IntPtr]::Zero) { [void][WgSqlite]::sqlite3_finalize($st) }
+                          [void][WgSqlite]::sqlite3_close($h)
+                      }
+                  } catch {
+                      $errs += "Pins von $user nicht lesbar: $($_.Exception.Message)"
+                  } finally {
+                      Remove-Item -LiteralPath $copy -Force -ErrorAction SilentlyContinue
+                  }
+              }
+              [pscustomobject]@{ Pins = $pins; Errors = $errs }
+          }
+
           $listing = Get-UpgradeRows
           $listingOk = $listing.Ok
           $rows = $listing.Rows
@@ -247,20 +312,28 @@
           # --include-pinned sind sie dabei - der Unterschied sind die Pins.
           # Angefasst werden sie nicht: ein Pin heisst "nur von Hand".
           $pinned = @()
+          $profilePins = @{}
           if ($listingOk) {
               $withPinned = Get-UpgradeRows -Extra @('--include-pinned')
               $normalIds = @($rows | ForEach-Object { $_.id })
               $pinned = @($withPinned.Rows | Where-Object { $_.id -notin $normalIds })
 
               # Darauf allein ist kein Verlass: Pins speichert winget pro
-              # Benutzer. Ein Pin, den ein Admin interaktiv gesetzt hat, sieht
+              # Benutzer. Ein Pin, den jemand interaktiv gesetzt hat, sieht
               # SYSTEM nicht - das Paket stuende in der normalen Liste und
-              # wuerde aktualisiert. Deshalb zusaetzlich die Pin-Liste von
-              # SYSTEM und die feste Liste aus dem Playbook (winget_pin_ids).
+              # wuerde aktualisiert. Deshalb zusaetzlich: die Pin-Liste von
+              # SYSTEM, die Pins aller Benutzerprofile und die feste Liste aus
+              # dem Inventory (winget_pin_ids).
               $pinLines = @((Invoke-Winget -Arguments @('pin', 'list', '--accept-source-agreements', '--disable-interactivity')).Lines)
+              $pinRead = Get-ProfilePins
+              $profilePins = $pinRead.Pins
+              # Nicht lesbare Pins gehoeren in den Bericht: sonst wird ein
+              # gepinntes Paket still aktualisiert.
+              $notes += @($pinRead.Errors)
               $held = @($rows | Where-Object {
                   $id = $_.id
                   ($ExcludeIds | Where-Object { $_ -eq $id }) -or
+                  $profilePins.ContainsKey($id) -or
                   ($pinLines | Where-Object { $_ -match ('(^|\s)' + [regex]::Escape($id) + '(\s|$)') })
               })
               if ($held.Count -gt 0) {
@@ -371,7 +444,9 @@
           if ($pinned.Count -gt 0) {
               $report += 'Gepinnt - werden nur von Hand aktualisiert:'
               foreach ($p in $pinned) {
-                  $report += '{0,-12} {1,-40} {2} -> {3}' -f '[GEPINNT]', $p.id, $p.version, $p.available
+                  $line = '{0,-12} {1,-40} {2} -> {3}' -f '[GEPINNT]', $p.id, $p.version, $p.available
+                  if ($profilePins.ContainsKey($p.id)) { $line += '  (Pin von ' + ($profilePins[$p.id] -join ', ') + ')' }
+                  $report += $line
               }
           }
           foreach ($n in $notes) { $report += 'Hinweis von winget: ' + $n.Trim() }
