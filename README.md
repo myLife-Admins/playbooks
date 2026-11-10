@@ -330,7 +330,9 @@ Snapshots (`serial: winupd_snapshot_parallel`), Installation (wieder parallel)
 und Versand. Ein `throttle` am Snapshot-Task reichte nicht: damit würden zwar
 nur zwei Snapshots gleichzeitig *angestoßen*, aber alle, bevor auf den ersten
 gewartet wird. Mit `serial` kommt die nächste Gruppe erst dran, wenn alle
-Snapshots der aktuellen fertig sind.
+Snapshots der aktuellen fertig sind. Damit Server ohne Updates keine Plätze
+belegen, sortiert die Vorbereitung die Server mit Snapshot per `group_by` in
+die Gruppe `winupd_snapshot`; nur über die läuft das Snapshot-Play.
 
 Einstellungen für den ganzen Lauf stehen in `vars/windows-update.yml` und
 werden per Extra-Var oder Survey überschrieben — nicht im Inventory, dafür

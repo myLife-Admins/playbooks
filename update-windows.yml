@@ -123,12 +123,31 @@
           ansible.builtin.set_fact:
             winupd_error: "{{ ansible_failed_result.msg | default('unbekannter Fehler') }}"
 
+    - name: Snapshot nicht vorgesehen
+      ansible.builtin.set_fact:
+        winupd_snapshot: uebersprungen (snapshot_required=false)
+      when:
+        - winupd_go | bool
+        - not (snapshot_required | default(true) | bool)
+
+    # Nur die Hosts, die wirklich einen Snapshot brauchen, kommen in die
+    # Gruppe fuer das Snapshot-Play. Sonst teilt serial nach Inventory-
+    # Reihenfolge ein, und Hosts ohne Updates belegen Plaetze - dann laeuft
+    # oft nur ein Snapshot statt zwei.
+    - name: Hosts mit Snapshot einsortieren
+      ansible.builtin.group_by:
+        key: >-
+          {{ 'winupd_snapshot' if (winupd_go | bool and snapshot_required | default(true) | bool)
+             else 'winupd_no_snapshot' }}
+
 
 # serial wird einmal fuer das ganze Play ausgewertet - deshalb nur aus
 # Extra-Var/Survey oder vars_files, nicht aus dem Inventory. Die naechsten
 # Hosts kommen dran, wenn alle Snapshots der aktuellen Gruppe fertig sind.
+# Braucht kein Host einen Snapshot, meldet Ansible hier nur, dass die Gruppe
+# leer ist, und macht weiter.
 - name: Windows-Updates - Snapshots
-  hosts: "{{ target_hosts | default('all') }}"
+  hosts: winupd_snapshot
   gather_facts: false
   vars_files:
     - vars/windows-update.yml
@@ -146,7 +165,7 @@
 
         - name: Snapshot merken
           ansible.builtin.set_fact:
-            winupd_snapshot: "{{ 'OK' if snapshot_required | default(true) | bool else 'uebersprungen (snapshot_required=false)' }}"
+            winupd_snapshot: OK
 
       rescue:
         - name: Fehler merken
