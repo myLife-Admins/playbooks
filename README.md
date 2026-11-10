@@ -163,9 +163,22 @@ Lauf so da, ist es Letzteres.
 **Gepinnte Pakete.** Pins heißen „nur von Hand aktualisieren", und das
 Playbook fasst sie nicht an. Damit sie trotzdem nicht aus dem Blick geraten,
 stehen die mit verfügbarem Update in einem eigenen Abschnitt. Erkannt werden
-sie am Unterschied zwischen `winget upgrade` und `winget upgrade --include-pinned`;
-eine Pin-Liste muss dafür nicht gelesen werden. Pins setzt und entfernt man
-am Host mit `winget pin add --id <id>` bzw. `winget pin remove --id <id>`.
+sie auf drei Wegen: am Unterschied zwischen `winget upgrade` und
+`winget upgrade --include-pinned`, an `winget pin list` und an der Variable
+`winget_pin_ids`.
+
+Achtung: winget speichert Pins **pro Benutzer**. Ein `winget pin add`, das ein
+Admin interaktiv absetzt, sieht das Playbook (läuft als SYSTEM) nicht — das
+Paket würde trotzdem aktualisiert. Verlässlich ist deshalb die Liste im
+Inventory, pro Host oder Gruppe:
+
+```ini
+[windows_server:vars]
+winget_pin_ids=['7zip.7zip', 'Mozilla.Firefox']
+```
+
+Exakte Ids wie in der Spalte „ID" von `winget upgrade`. Nicht als Play-Variable
+im Playbook setzen — die würde das Inventory überstimmen.
 
 **Offline-Hosts sind kein Fehler.** Vor winget prüft das Playbook kurz, ob der
 WinRM-Port antwortet (`winget_reach_timeout`, Standard 5 s, direkt aus dem

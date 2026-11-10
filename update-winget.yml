@@ -48,6 +48,12 @@
     # So lange wird auf den WinRM-Port gewartet, bevor ein Host als offline
     # gilt.
     winget_reach_timeout: 5
+    # Pakete, die nie automatisch aktualisiert werden - zusaetzlich zu den
+    # winget-Pins. Noetig, weil winget Pins pro Benutzer speichert und SYSTEM
+    # die Pins eines Admins nicht sieht. Exakte Ids, z.B.
+    #   winget_pin_ids: ['7zip.7zip', 'Mozilla.Firefox']
+    # Im Inventory (Host oder Gruppe) oder als Extra-Var setzen - nicht hier:
+    # Play-Variablen schlagen Inventory-Variablen.
 
   tasks:
     # Fuer den Bericht im zweiten Play: welche Hosts dieser Lauf hatte,
@@ -102,13 +108,15 @@
           Mode: "{{ 'list' if (winget_dry_run | bool) else 'upgrade' }}"
           Source: "{{ winget_source }}"
           VerifySeconds: "{{ winget_verify_seconds | int }}"
+          ExcludeIds: "{{ winget_pin_ids | default([]) | list }}"
         script: |
           [CmdletBinding()]
           param (
               [ValidateSet('list', 'upgrade')]
               [string]$Mode,
               [string]$Source,
-              [int]$VerifySeconds
+              [int]$VerifySeconds,
+              [string[]]$ExcludeIds = @()
           )
           # Bewusst nicht 'Stop': PowerShell 5.1 bricht sonst bei der ersten
           # Zeile auf stderr eines externen Programms ab.
@@ -243,6 +251,23 @@
               $withPinned = Get-UpgradeRows -Extra @('--include-pinned')
               $normalIds = @($rows | ForEach-Object { $_.id })
               $pinned = @($withPinned.Rows | Where-Object { $_.id -notin $normalIds })
+
+              # Darauf allein ist kein Verlass: Pins speichert winget pro
+              # Benutzer. Ein Pin, den ein Admin interaktiv gesetzt hat, sieht
+              # SYSTEM nicht - das Paket stuende in der normalen Liste und
+              # wuerde aktualisiert. Deshalb zusaetzlich die Pin-Liste von
+              # SYSTEM und die feste Liste aus dem Playbook (winget_pin_ids).
+              $pinLines = @((Invoke-Winget -Arguments @('pin', 'list', '--accept-source-agreements', '--disable-interactivity')).Lines)
+              $held = @($rows | Where-Object {
+                  $id = $_.id
+                  ($ExcludeIds | Where-Object { $_ -eq $id }) -or
+                  ($pinLines | Where-Object { $_ -match ('(^|\s)' + [regex]::Escape($id) + '(\s|$)') })
+              })
+              if ($held.Count -gt 0) {
+                  $heldIds = @($held | ForEach-Object { $_.id })
+                  $pinned += $held
+                  $rows = @($rows | Where-Object { $_.id -notin $heldIds })
+              }
           }
 
           $packages = @(foreach ($row in $rows) {
