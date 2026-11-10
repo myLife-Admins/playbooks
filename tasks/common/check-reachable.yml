@@ -1,0 +1,37 @@
+---
+# Kurzer Blick auf den Verbindungsport, bevor Ansible sich verbindet.
+# Ausgeschaltete oder nicht mehr existierende Rechner sind beim Patchen
+# normal und kein Fehler - so werden sie sauber abgetrennt, ohne die langen
+# Verbindungsfehler im Log.
+#
+# Ergebnis: host_offline (true/false).
+# Optional: reach_timeout (Sekunden, Standard 5).
+#
+# Port: ansible_port, sonst 5985 fuer WinRM/PSRP und 22 fuer SSH.
+
+# Bei delegate_to zeigen ansible_host und ansible_port auf den delegierten
+# Host (localhost) - deshalb ausdruecklich ueber hostvars.
+- name: Erreichbarkeit pruefen
+  ansible.builtin.wait_for:
+    host: "{{ hostvars[inventory_hostname].ansible_host | default(inventory_hostname) }}"
+    port: >-
+      {{ hostvars[inventory_hostname].ansible_port
+         | default(5985 if (ansible_connection | default('ssh')) in ['winrm', 'psrp'] else 22)
+         | int }}
+    timeout: "{{ reach_timeout | default(5) | int }}"
+  delegate_to: localhost
+  connection: local
+  register: reach_check
+  failed_when: false
+
+# Offline nur bei genau diesem Timeout. Scheitert der Check aus einem anderen
+# Grund, wird die Verbindung trotzdem versucht - ein echter Fehler zeigt sich
+# dann dort, statt einen erreichbaren Host stumm zu ueberspringen.
+- name: Erreichbarkeit merken
+  ansible.builtin.set_fact:
+    host_offline: "{{ 'Timeout when waiting' in (reach_check.msg | default('')) }}"
+
+- name: Offline melden
+  ansible.builtin.debug:
+    msg: "offline - Port antwortet nicht (ausgeschaltet oder nicht im DNS)"
+  when: host_offline | bool

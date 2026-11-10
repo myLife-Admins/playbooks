@@ -45,9 +45,6 @@
     # Nachkontrolle: so lange wird nach den Updates hoechstens gewartet, bis
     # die aktualisierten Pakete aus der Liste verschwunden sind.
     winget_verify_seconds: 180
-    # So lange wird auf den WinRM-Port gewartet, bevor ein Host als offline
-    # gilt.
-    winget_reach_timeout: 5
     # Pakete, die nie automatisch aktualisiert werden - zusaetzlich zu den
     # winget-Pins. Noetig, weil winget Pins pro Benutzer speichert und SYSTEM
     # die Pins eines Admins nicht sieht. Exakte Ids, z.B.
@@ -56,43 +53,15 @@
     # Play-Variablen schlagen Inventory-Variablen.
 
   tasks:
-    # Fuer den Bericht im zweiten Play: welche Hosts dieser Lauf hatte,
-    # auch die, die unterwegs scheitern oder nicht erreichbar sind.
     - name: Hosts dieses Laufs merken
-      ansible.builtin.set_fact:
-        winget_play_hosts: "{{ ansible_play_hosts_all }}"
-      delegate_to: localhost
-      delegate_facts: true
-      run_once: true
+      ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/common/remember-run-hosts.yml"
 
-    # Ausgeschaltete oder nicht mehr existierende Rechner sind beim Patchen
-    # normal und kein Fehler. Ein kurzer Blick auf den WinRM-Port vorab
-    # trennt sie sauber ab - ohne die langen Verbindungsfehler im Log, die
-    # ein direkter WinRM-Versuch erzeugt.
-    # Achtung: Bei delegate_to zeigen ansible_host und ansible_port auf den
-    # delegierten Host (localhost) - deshalb ausdruecklich ueber hostvars.
+    - name: Ausgangswerte setzen
+      ansible.builtin.set_fact:
+        host_offline: false
+
     - name: Erreichbarkeit pruefen
-      ansible.builtin.wait_for:
-        host: "{{ hostvars[inventory_hostname].ansible_host | default(inventory_hostname) }}"
-        port: "{{ hostvars[inventory_hostname].ansible_port | default(5985) | int }}"
-        timeout: "{{ winget_reach_timeout | int }}"
-      delegate_to: localhost
-      connection: local
-      register: winget_reach
-      failed_when: false
-      when: (ansible_connection | default('ssh')) in ['winrm', 'psrp']
-
-    # Offline nur bei genau diesem Timeout. Scheitert der Check aus einem
-    # anderen Grund, wird winget trotzdem versucht - ein echter Fehler zeigt
-    # sich dann dort, statt einen erreichbaren Host stumm zu ueberspringen.
-    - name: Erreichbarkeit merken
-      ansible.builtin.set_fact:
-        winget_offline: "{{ 'Timeout when waiting' in (winget_reach.msg | default('')) }}"
-
-    - name: Offline melden
-      ansible.builtin.debug:
-        msg: "offline - Port {{ ansible_port | default(5985) }} antwortet nicht (ausgeschaltet oder nicht im DNS)"
-      when: winget_offline | bool
+      ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/common/check-reachable.yml"
 
     - name: winget als SYSTEM aufrufen
       become: true
@@ -468,7 +437,7 @@
       register: winget_run
       when:
         - (ansible_connection | default('ssh')) in ['winrm', 'psrp']
-        - not (winget_offline | bool)
+        - not (host_offline | bool)
       # Fehler und Unerreichbarkeit werden unten zu einem Problem pro Host.
       # So laeuft jeder Host bis zum Bericht durch.
       ignore_errors: true
@@ -483,7 +452,7 @@
         winget_problem: "{{ winget_problem_text | default('', true) | trim }}"
       vars:
         winget_problem_text: >-
-          {%- if winget_offline | bool -%}
+          {%- if host_offline | bool -%}
           {%- elif (ansible_connection | default('ssh')) not in ['winrm', 'psrp'] -%}
           kein Windows-Host (ansible_connection={{ ansible_connection | default('ssh') }}) -
           im Inventory ansible_connection=winrm setzen
@@ -535,40 +504,32 @@
 # Zweites Play: Bericht aller Hosts einsammeln, per Mail verschicken und erst
 # dann den Lauf scheitern lassen, wenn es irgendwo ein Problem gab.
 #
-# Mail geht nur raus, wenn mail_to gesetzt ist. Am bequemsten als
-# Variablengruppe in Semaphore (Extra-Variablen):
-#   {"mail_host": "smtp.example.local", "mail_to": "it@example.de",
-#    "mail_from": "semaphore@example.de"}
-# Optional: mail_port (25), mail_secure (try), mail_username, mail_password.
-# Ohne mail_from ist der Empfaenger zugleich Absender - das nehmen interne
-# Relays meist an.
+# Mail geht nur raus, wenn mail_to gesetzt ist - Einstellungen siehe
+# tasks/common/send-report-mail.yml.
 - name: Bericht verschicken
   hosts: localhost
   gather_facts: false
 
-  vars:
-    winget_hosts: "{{ winget_play_hosts | default([]) }}"
-
   tasks:
     - name: Ergebnisse aller Hosts einsammeln
       ansible.builtin.set_fact:
-        winget_results: >-
-          {{ winget_results | default([]) + [{
+        report_results: >-
+          {{ report_results | default([]) + [{
                'host': item,
                'problem': hostvars[item].winget_problem
                           if hostvars[item].winget_problem is defined
                           else 'kein Ergebnis - Host hat den Lauf nicht erreicht',
-               'offline': hostvars[item].winget_offline | default(false) | bool,
+               'offline': hostvars[item].host_offline | default(false) | bool,
                'mode': hostvars[item].winget_run.result.mode | default('-'),
                'counts': hostvars[item].winget_run.result.counts | default({}),
                'report': hostvars[item].winget_run.result.report | default([])
              }] }}
-      loop: "{{ winget_hosts }}"
+      loop: "{{ report_hosts | default([]) }}"
 
     - name: Betreff und Text zusammenstellen
       ansible.builtin.set_fact:
-        winget_mail_subject: >-
-          {%- set results = winget_results | default([]) -%}
+        report_subject: >-
+          {%- set results = report_results | default([]) -%}
           {%- set counts = results | map(attribute='counts') | list -%}
           {%- set ok = counts | map(attribute='aktualisiert', default=0) | map('int') | sum -%}
           {%- set failed = counts | map(attribute='fehlgeschlagen', default=0) | map('int') | sum -%}
@@ -591,9 +552,9 @@
           [winget] {{ results | length }} Host(s): {{ totals or 'nichts anstehend' }}
           {%- if problems %} - {{ problems }} mit Problem{% endif -%}
           {%- endif -%}
-        winget_mail_body: |
+        report_body: |
           winget-Bericht aus Semaphore
-          {% for r in winget_results | default([]) | rejectattr('offline') %}
+          {% for r in report_results | default([]) | rejectattr('offline') %}
 
           === {{ r.host }} ({{ {'list': 'nur Liste', 'upgrade': 'Aktualisierung'}[r.mode] | default('kein Lauf') }}) ===
           {% if r.problem %}
@@ -603,7 +564,7 @@
           {{ line }}
           {% endfor %}
           {% endfor %}
-          {% set offline_hosts = winget_results | default([]) | selectattr('offline') | map(attribute='host') | list %}
+          {% set offline_hosts = report_results | default([]) | selectattr('offline') | map(attribute='host') | list %}
           {% if offline_hosts %}
 
           === Offline ({{ offline_hosts | length }}) - ausgeschaltet oder nicht im DNS ===
@@ -612,48 +573,8 @@
           {% endfor %}
           {% endif %}
 
-    - name: Betreff anzeigen
-      ansible.builtin.debug:
-        msg: "{{ winget_mail_subject }}"
-
-    - name: Mail-Einstellungen pruefen
-      ansible.builtin.assert:
-        that: mail_host is defined
-        fail_msg: mail_to ist gesetzt, aber mail_host fehlt.
-        quiet: true
-      when: mail_to is defined
-
     - name: Bericht per Mail verschicken
-      community.general.mail:
-        host: "{{ mail_host }}"
-        port: "{{ mail_port | default(25) | int }}"
-        secure: "{{ mail_secure | default('try') }}"
-        username: "{{ mail_username | default(omit) }}"
-        password: "{{ mail_password | default(omit) }}"
-        sender: "{{ mail_from | default(mail_to) }}"
-        to: "{{ mail_to }}"
-        subject: "{{ winget_mail_subject }}"
-        body: "{{ winget_mail_body }}"
-        charset: utf-8
-      when: mail_to is defined
-
-    - name: Hinweis, wenn keine Mail verschickt wurde
-      ansible.builtin.debug:
-        msg: Keine Mail - mail_to ist nicht gesetzt.
-      when: mail_to is not defined
-
-    - name: Lauf scheitern lassen, wenn kein Host getroffen wurde
-      ansible.builtin.fail:
-        msg: >-
-          Das Muster '{{ target_hosts | default('all') }}' hat keinen Host
-          getroffen - Inventory oder target_hosts pruefen.
-      when: winget_hosts | length == 0
+      ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/common/send-report-mail.yml"
 
     - name: Lauf scheitern lassen, wenn es Probleme gab
-      ansible.builtin.fail:
-        msg: >-
-          Probleme auf {{ problem_hosts | join(', ') }} - Einzelheiten im
-          Bericht darueber und in der Mail.
-      vars:
-        problem_hosts: "{{ winget_results | default([]) | selectattr('problem') | map(attribute='host') | list }}"
-      when: problem_hosts | length > 0
+      ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/common/fail-on-problems.yml"

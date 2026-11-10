@@ -1,0 +1,14 @@
+---
+# Merkt am localhost, welche Hosts dieser Lauf hat - auch die, die spaeter
+# scheitern oder nicht erreichbar sind. Das Abschluss-Play liest die Liste
+# als hostvars['localhost'].report_hosts bzw. dort direkt als report_hosts.
+#
+# Einbinden als erster Task des Host-Plays:
+#   - ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/common/remember-run-hosts.yml"
+
+- name: Hosts dieses Laufs merken
+  ansible.builtin.set_fact:
+    report_hosts: "{{ ansible_play_hosts_all }}"
+  delegate_to: localhost
+  delegate_facts: true
+  run_once: true

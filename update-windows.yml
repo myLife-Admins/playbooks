@@ -1,0 +1,276 @@
+---
+# Windows-Updates auf Servern (2016 bis 2025) mit Protokoll im Format der
+# Patch-Protokolle auf \\fs5\IT-Protokolle.
+#
+# Standardmaessig nur ein Testlauf (winupd_dry_run: true): es wird gesucht und
+# gelistet, sonst nichts. Erst mit
+#   Extra-Var  winupd_dry_run=false
+# gibt es Snapshot, Installation und Neustarts.
+#
+# Ablauf pro Server:
+#   1. Snapshot 'WSU_<Datum>' im vCenter (nur wenn Updates anstehen)
+#   2. steht schon ein Neustart aus, zuerst neu starten
+#   3. Runde 0: nur die Updates aus winupd_first (Servicing Stack usw.) -
+#      die muessen vor allem anderen drauf sein, sonst scheitert der Rest
+#   4. Runde 1: alles Uebrige, Neustart wenn noetig
+#   5. Nachlauf: suchen - neu starten - suchen, bis nichts mehr kommt
+#      (einige Updates werden erst nach einem Neustart angeboten)
+#   6. Rescan, Version und freier Platz fuer das Protokoll
+#
+# Im Protokoll fuellt das Playbook die Punkte mit OK/FEHLER. Die Punkte, hinter
+# die ihr von Hand Uhrzeit und Datum schreibt (WSUS-Status, Logs, Abmelden,
+# VMTools, Snapshot loeschen), bleiben leer. Vorlage:
+# templates/windows-update-protocol.j2
+#
+# Variablen pro Host oder Gruppe im Inventory - NICHT hier im Playbook setzen,
+# sonst schlagen die Play-Variablen das Inventory:
+#   winupd_manual=true      Server wird von Hand gepatcht, nur Leerblock
+#   winupd_reboot=false     nicht neu starten, Protokoll sagt "manueller
+#                           Neustart noetig"
+#   vm_name=<Name>          Name der VM im vCenter, falls er weder dem
+#                           Kurznamen noch dem FQDN des Hosts entspricht
+#   snapshot_required=false Host ohne VM im vCenter (physisch)
+#
+# vCenter - Namen wie im alten update-windows-server.yml (Variablengruppe in
+# Semaphore, Passwort als Secret):
+#   vm_user, vm_password
+#   optional vcenter_hostname (vcenter1.gutingia.local),
+#   vcenter_validate_certs (false - interne CA)
+# Ohne Snapshot keine Updates.
+#
+# Mail wie bei update-winget.yml: mail_host, mail_to, optional mail_from usw.
+
+- name: Windows-Updates
+  hosts: "{{ target_hosts | default('all') }}"
+  gather_facts: false
+
+  vars:
+    winupd_dry_run: true
+    winupd_min_free_gb: 16
+    # Runde 0 und hoechstens so viele weitere Runden
+    winupd_max_rounds: 4
+    # Diese Updates kommen in Runde 0 vor allen anderen. Regex auf Titel oder
+    # KB-Nummer.
+    winupd_first:
+      - Servicing Stack
+      - Wartungsstapel
+      - Wartungsstack
+    # Kategorien wie bei win_updates (Leerzeichen egal). '*' = alle.
+    win_update_categories:
+      - CriticalUpdates
+      - DefinitionUpdates
+      - SecurityUpdates
+      - UpdateRollups
+      - Updates
+    winupd_first_regex: "{{ winupd_first | join('|') if winupd_first | length > 0 else '(?!)' }}"
+    winupd_snapshot_name: "WSU_{{ now(fmt='%Y-%m-%d') }}"
+    winupd_short: "{{ inventory_hostname.split('.')[0] | lower }}"
+    winupd_vcenter: "{{ vcenter_hostname | default('vcenter1.gutingia.local') }}"
+    winupd_is_windows: "{{ (ansible_connection | default('ssh')) in ['winrm', 'psrp'] }}"
+    winupd_skip: "{{ winupd_manual | default(false) | bool or host_offline | bool }}"
+
+  tasks:
+    - name: Hosts dieses Laufs merken
+      ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/common/remember-run-hosts.yml"
+
+    - name: Ausgangswerte setzen
+      ansible.builtin.set_fact:
+        host_offline: false
+        winupd_error: ''
+        winupd_snapshot: ''
+        winupd_pending: []
+        winupd_sizes: {}
+        winupd_installed: []
+        winupd_failed: []
+        win_reboots: []
+        winupd_reboot_manual: false
+        winupd_start: ''
+        winupd_done: false
+        winupd_info_before: {}
+        winupd_info_after: {}
+        winupd_rescan: {}
+
+    - name: Erreichbarkeit pruefen
+      ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/common/check-reachable.yml"
+      when: not (winupd_manual | default(false) | bool)
+
+    - name: Updates
+      when: not (winupd_skip | bool)
+      block:
+        - name: Kein Windows-Host
+          ansible.builtin.fail:
+            msg: >-
+              kein Windows-Host (ansible_connection={{ ansible_connection | default('ssh') }})
+              - im Inventory ansible_connection=winrm setzen
+          when: not (winupd_is_windows | bool)
+
+        - name: Stand vorher
+          ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/windows/host-info.yml"
+
+        - name: Stand vorher merken
+          ansible.builtin.set_fact:
+            winupd_info_before: "{{ win_host_info }}"
+
+        - name: Anstehende Updates suchen
+          ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/windows/search-updates.yml"
+
+        - name: Anstehende Updates merken
+          ansible.builtin.set_fact:
+            winupd_pending: "{{ win_update_search.updates }}"
+            winupd_sizes: >-
+              {{ dict(win_update_search.updates | map(attribute='id') |
+                      zip(win_update_search.updates | map(attribute='size'))) }}
+            winupd_needed: >-
+              {{ win_update_search.updates | length > 0 or winupd_info_before.pending_reboot | bool }}
+
+        - name: Anstehende Updates anzeigen
+          ansible.builtin.debug:
+            msg: "{{ winupd_pending | map(attribute='title') | list }}"
+
+        - name: Snapshot anlegen
+          ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/vmware/create-snapshot.yml"
+          vars:
+            snapshot_name: "{{ winupd_snapshot_name }}"
+            snapshot_description: Vor Windows-Updates (Semaphore)
+          when:
+            - not (winupd_dry_run | bool)
+            - winupd_needed | bool
+
+        - name: Snapshot merken
+          ansible.builtin.set_fact:
+            winupd_snapshot: "{{ 'OK' if snapshot_required | default(true) | bool else 'uebersprungen (snapshot_required=false)' }}"
+          when:
+            - not (winupd_dry_run | bool)
+            - winupd_needed | bool
+
+        - name: Ausstehenden Neustart zuerst erledigen
+          ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/windows/reboot-logged.yml"
+          when:
+            - not (winupd_dry_run | bool)
+            - winupd_info_before.pending_reboot | bool
+            - winupd_reboot | default(true) | bool
+
+        - name: Runden
+          ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/windows/update-round.yml"
+          loop: "{{ range(0, winupd_max_rounds | int + 1) | list }}"
+          loop_control:
+            loop_var: round_idx
+          when:
+            - not (winupd_dry_run | bool)
+            - winupd_needed | bool
+
+      rescue:
+        - name: Fehler merken
+          ansible.builtin.set_fact:
+            winupd_error: "{{ ansible_failed_result.msg | default('unbekannter Fehler') }}"
+
+    # --- Abschluss, auch nach einem Fehler -----------------------------------
+    # apply: die Schluesselwoerter muessen an die eingebundenen Tasks, an
+    # include_tasks selbst wirken sie nicht.
+    - name: Rescan
+      ansible.builtin.include_tasks:
+        file: "{{ playbook_dir }}/tasks/windows/search-updates.yml"
+        apply:
+          ignore_errors: true
+          ignore_unreachable: true
+      when:
+        - not (winupd_skip | bool)
+        - winupd_is_windows | bool
+        - not (winupd_dry_run | bool)
+
+    - name: Rescan merken
+      ansible.builtin.set_fact:
+        winupd_rescan: "{{ win_update_search_raw.result | default({}) }}"
+      when:
+        - not (winupd_skip | bool)
+        - winupd_is_windows | bool
+        - not (winupd_dry_run | bool)
+
+    - name: Stand nachher
+      ansible.builtin.include_tasks:
+        file: "{{ playbook_dir }}/tasks/windows/host-info.yml"
+        apply:
+          ignore_errors: true
+          ignore_unreachable: true
+      when:
+        - not (winupd_skip | bool)
+        - winupd_is_windows | bool
+
+    - name: Stand nachher merken
+      ansible.builtin.set_fact:
+        winupd_info_after: "{{ win_host_info_raw.result | default({}) }}"
+      when:
+        - not (winupd_skip | bool)
+        - winupd_is_windows | bool
+
+    - name: Protokoll schreiben
+      ansible.builtin.set_fact:
+        winupd_protocol: "{{ lookup('ansible.builtin.template', 'windows-update-protocol.j2') }}"
+        winupd_problem: >-
+          {{ winupd_error if winupd_error | length > 0
+             else ((winupd_failed | map(attribute='id') | unique | list | length) ~ ' Update(s) fehlgeschlagen'
+                   if winupd_failed | length > 0 else '') }}
+
+    - name: Protokoll
+      ansible.builtin.debug:
+        msg: "{{ winupd_protocol.split('\n') }}"
+
+
+- name: Protokoll verschicken
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+    # Wie in den Protokollen: Leerzeile, Strich, Leerzeile
+    winupd_separator: "\n\n--------------------------------------------------------------------------\n\n"
+
+  tasks:
+    - name: Ergebnisse aller Hosts einsammeln
+      ansible.builtin.set_fact:
+        report_results: >-
+          {{ report_results | default([]) + [{
+               'host': item,
+               'offline': hostvars[item].host_offline | default(false) | bool,
+               'manual': hostvars[item].winupd_manual | default(false) | bool,
+               'protocol': hostvars[item].winupd_protocol | default(item.split('.')[0] | lower ~ '():\n FEHLER: Host hat das Protokoll nicht erreicht'),
+               'problem': hostvars[item].winupd_problem
+                          if hostvars[item].winupd_problem is defined
+                          else 'kein Ergebnis - Host hat den Lauf nicht erreicht',
+               'installed': hostvars[item].winupd_installed | default([]) | length,
+               'pending': hostvars[item].winupd_pending | default([]) | length
+             }] }}
+      loop: "{{ report_hosts | default([]) }}"
+
+    - name: Betreff und Text zusammenstellen
+      ansible.builtin.set_fact:
+        report_subject: >-
+          {%- set r = report_results | default([]) -%}
+          {%- set online = r | rejectattr('offline') | rejectattr('manual') | list -%}
+          {%- set problems = r | selectattr('problem') | list | length -%}
+          {%- set parts = [
+                ((online | map(attribute='installed') | sum) ~ ' Updates installiert')
+                  if not (winupd_dry_run | default(true) | bool) else
+                ((online | map(attribute='pending') | sum) ~ ' Updates anstehend (Testlauf)'),
+                ((r | selectattr('manual') | list | length) ~ ' manuell') if r | selectattr('manual') | list else '',
+                ((r | selectattr('offline') | list | length) ~ ' offline') if r | selectattr('offline') | list else ''
+              ] | select | join(', ') -%}
+          {%- if r | length == 0 -%}
+          [Windows-Updates] kein Host getroffen - Inventory pruefen
+          {%- else -%}
+          [Windows-Updates] {{ r | length }} Host(s): {{ parts }}
+          {%- if problems %} - {{ problems }} mit Problem{% endif -%}
+          {%- endif -%}
+        report_body: |-
+          {%- set r = report_results | default([]) -%}
+          {%- set blocks = r | rejectattr('offline') | map(attribute='protocol') | list -%}
+          {%- set offline = r | selectattr('offline') | map(attribute='host') | list -%}
+          {{ blocks | join(winupd_separator) }}
+          {%- if offline %}{{ winupd_separator }}=== Offline ({{ offline | length }}) - ausgeschaltet oder nicht im DNS ===
+          {% for h in offline %}  - {{ h }}
+          {% endfor %}{% endif %}
+
+    - name: Protokoll per Mail verschicken
+      ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/common/send-report-mail.yml"
+
+    - name: Lauf scheitern lassen, wenn es Probleme gab
+      ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/common/fail-on-problems.yml"

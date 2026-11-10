@@ -4,8 +4,9 @@ Patch-Playbooks für die monatlichen Serverupdates, betrieben über Semaphore.
 
 ## Stand dieses Branches
 
-`stable` enthält derzeit `update-apt.yml`, `update-winget.yml` und
-`pull-playbooks.yml`. Der Commit `clear` (1092d36) hat
+`stable` enthält derzeit `update-apt.yml`, `update-winget.yml`,
+`update-windows.yml` und `pull-playbooks.yml`, dazu gemeinsame Bausteine unter
+`tasks/` und `templates/`. Der Commit `clear` (1092d36) hat
 den übrigen Bestand entfernt: `ansible.cfg`, `inventory/`, `requirements.yml`
 und beide Produktions-Playbooks samt `tasks/`. Verloren ist davon nichts, der
 Stand davor liegt in `482ad68` und lässt sich gezielt zurückholen:
@@ -288,7 +289,60 @@ Für die Codes `0x8A150014`, `0x8A15002B`, `0x8A150101`, `0x8A150109` und
 Bericht. Der Text ist nur Erläuterung — ob ein Paket als Erfolg zählt,
 entscheidet allein der Code.
 
-### `update-windows-server.yml` — Windows
+### `update-windows.yml` — Windows-Updates mit Patch-Protokoll
+
+Installiert Windows-Updates auf Servern 2016 bis 2025 und schreibt pro Server
+einen Block im Format der Patch-Protokolle unter `\fs5\IT-Protokolle`.
+Vorerst geht das Protokoll per Mail raus (Einstellungen wie bei winget).
+
+**Standard ist ein Testlauf** (`winupd_dry_run: true`): suchen und listen,
+kein Snapshot, keine Installation, kein Neustart. Scharf mit
+`winupd_dry_run=false` (Survey-Variable, Typ Enum).
+
+Ablauf pro Server:
+
+1. Snapshot `WSU_<Datum>` im vCenter — nur wenn Updates anstehen. Ohne
+   Snapshot keine Updates.
+2. Steht schon ein Neustart aus, zuerst neu starten.
+3. **Runde 0:** nur die Updates aus `winupd_first` (Servicing Stack). Die
+   müssen vor allem anderen drauf sein, sonst scheitert der Rest.
+4. **Runde 1:** alles Übrige, Neustart wenn nötig.
+5. **Nachlauf:** suchen → installieren → neu starten, bis nichts mehr kommt
+   (höchstens `winupd_max_rounds`). Manche Updates werden erst nach einem
+   Neustart angeboten; sie stehen im Protokoll als `[Nachlauf <Zeit>]`.
+6. Rescan, Version und freier Platz auf C:.
+
+Im Protokoll füllt das Playbook Snapshot, Updates, Neustart, Rescan,
+Festplattenspeicher (unter `winupd_min_free_gb` = 16 GB → FEHLER) und
+Versionsupdate. WSUS-Status, Logs, Abmelden, VMTools und Snapshot löschen
+bleiben leer — dort tragt ihr wie bisher Uhrzeit und Datum ein. Server mit
+`winupd_manual=true` bekommen den Leerblock `[MANUELL]`. Offline-Server stehen
+am Ende als Liste. Die Vorlage liegt in `templates/windows-update-protocol.j2`.
+
+Zeiten (`Installation gestarted`, `Neustart von … bis …`) sind die Uhrzeit am
+Server, nicht die des Semaphore-Containers.
+
+Variablen pro Host oder Gruppe im Inventory:
+
+| Variable | Wirkung |
+|---|---|
+| `winupd_manual=true` | wird von Hand gepatcht, nur Leerblock |
+| `winupd_reboot=false` | kein automatischer Neustart, Protokoll: „manueller Neustart noetig" |
+| `vm_name=<Name>` | VM-Name im vCenter, falls weder Kurzname noch FQDN |
+| `snapshot_required=false` | Host ohne VM (physisch) |
+
+vCenter-Zugang wie im alten `update-windows-server.yml` als Variablengruppe:
+`vm_user`, `vm_password` (Secret), optional `vcenter_hostname`
+(Standard `vcenter1.gutingia.local`) und `vcenter_validate_certs` (Standard
+`false`). Die VM wird per REST-API über den Namen gefunden, der Snapshot läuft
+über `vmware.vmware.vm_snapshot`. `vcenter_hostname` muss als FQDN unter
+`NO_PROXY` fallen.
+
+Noch nicht drin, was das alte Playbook konnte: Dienste vor dem Patchen stoppen
+und danach starten (`windows_patch_services`) und das Schreiben direkt auf den
+Share.
+
+### `update-windows-server.yml` — Windows (alt)
 
 *Derzeit nicht im Branch, siehe [Stand](#stand-dieses-branches).*
 
@@ -737,10 +791,32 @@ Im Branch:
 ```
 update-apt.yml                  Linux-Programme (apt), dry run als Standard
 update-winget.yml               Windows-Programme (winget), dry run als Standard
+update-windows.yml              Windows-Updates + Patch-Protokoll, dry run als Standard
 pull-playbooks.yml              git pull im Playbook-Ordner
+tasks/
+  common/
+    remember-run-hosts.yml      Hosts des Laufs fuer das Abschluss-Play merken
+    check-reachable.yml         Port-Check vorab -> host_offline
+    send-report-mail.yml        Bericht per Mail (report_subject/report_body)
+    fail-on-problems.yml        Lauf am Ende rot, wenn es Probleme gab
+  windows/
+    host-info.yml               OS, Version (Release.UBR), freier Platz, Neustart aus?
+    host-time.yml               Uhrzeit am Host im Protokollformat
+    search-updates.yml          Updates suchen (WUA, mit Groesse)
+    reboot-logged.yml           Neustart mit Beginn/Ende -> win_reboots
+    update-round.yml            eine Runde suchen/installieren/neu starten
+  vmware/
+    create-snapshot.yml         Snapshot ueber vCenter, VM per Name
+templates/
+  windows-update-protocol.j2    Protokollblock eines Servers
 README.md
 .gitignore
 ```
+
+Jeder Baustein beschreibt im Kopf, was er erwartet und was er hinterlässt.
+Eingebunden wird mit `include_tasks: "{{ playbook_dir }}/tasks/…"` — der volle
+Pfad, weil Ansible relative Pfade in verschachtelten Includes zuerst neben der
+einbindenden Datei sucht.
 
 Nach `git checkout 482ad68 -- …` (siehe [Stand](#stand-dieses-branches)) kommt
 der volle Bestand zurück:

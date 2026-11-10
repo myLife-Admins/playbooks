@@ -1,0 +1,24 @@
+---
+# Laesst den Lauf am Ende scheitern - erst nach dem Bericht, sonst kaeme die
+# Mail ausgerechnet dann nicht, wenn etwas schiefgeht.
+#
+# Eingabe:
+#   report_hosts    Hosts des Laufs (aus remember-run-hosts.yml)
+#   report_results  Liste mit {'host': ..., 'problem': ...}; leeres problem =
+#                   alles gut
+
+- name: Lauf scheitern lassen, wenn kein Host getroffen wurde
+  ansible.builtin.fail:
+    msg: >-
+      Das Muster '{{ target_hosts | default('all') }}' hat keinen Host
+      getroffen - Inventory oder target_hosts pruefen.
+  when: report_hosts | default([]) | length == 0
+
+- name: Lauf scheitern lassen, wenn es Probleme gab
+  ansible.builtin.fail:
+    msg: >-
+      Probleme auf {{ problem_hosts | join(', ') }} - Einzelheiten im
+      Bericht darueber und in der Mail.
+  vars:
+    problem_hosts: "{{ report_results | default([]) | selectattr('problem') | map(attribute='host') | list }}"
+  when: problem_hosts | length > 0

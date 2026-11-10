@@ -1,0 +1,100 @@
+---
+# Legt im vCenter einen Snapshot der VM dieses Hosts an. Ohne Snapshot soll
+# nicht gepatcht werden - jeder Fehler hier bricht den Host ab.
+#
+# Eingabe:
+#   snapshot_name, snapshot_description
+#   vm_user, vm_password          Zugang zum vCenter (Variablengruppe/Secret)
+# Optional:
+#   vcenter_hostname              Standard vcenter1.gutingia.local
+#   vcenter_validate_certs        Standard false (interne CA)
+#   vm_name                       Name der VM, wenn er weder Kurzname noch
+#                                 FQDN des Hosts ist
+#   snapshot_required=false       Host ohne VM (physisch): nichts tun
+#
+# Die VM wird per REST-API ueber den Namen gesucht (Gross-/Kleinschreibung
+# egal), so braucht es weder Ordner noch Datacenter. Der Snapshot selbst
+# laeuft ueber vmware.vmware.vm_snapshot mit der gefundenen MOID.
+#
+# Proxy: Die Aufrufe laufen im Semaphore-Container. vcenter_hostname muss als
+# FQDN unter NO_PROXY fallen (.gutingia.local), sonst geht es an den Proxy.
+
+- name: Snapshot im vCenter
+  when: snapshot_required | default(true) | bool
+  vars:
+    vc_host: "{{ vcenter_hostname | default('vcenter1.gutingia.local') }}"
+    vc_validate: "{{ vcenter_validate_certs | default(false) | bool }}"
+    vc_names: >-
+      {{ [vm_name | default(inventory_hostname.split('.')[0]), inventory_hostname]
+         | map('regex_escape') | join('|') }}
+  block:
+    - name: Zugangsdaten pruefen
+      ansible.builtin.assert:
+        that:
+          - vm_user is defined
+          - vm_password is defined
+        fail_msg: >-
+          kein Snapshot moeglich - vm_user/vm_password fehlen (Variablengruppe).
+          Fuer Hosts ohne VM: snapshot_required=false
+        quiet: true
+
+    - name: vCenter-Anmeldung
+      ansible.builtin.uri:
+        url: "https://{{ vc_host }}/api/session"
+        method: POST
+        url_username: "{{ vm_user }}"
+        url_password: "{{ vm_password }}"
+        force_basic_auth: true
+        validate_certs: "{{ vc_validate }}"
+        status_code: 201
+      register: vc_session
+      delegate_to: localhost
+      no_log: true
+
+    - name: VMs im vCenter abfragen
+      ansible.builtin.uri:
+        url: "https://{{ vc_host }}/api/vcenter/vm"
+        headers:
+          vmware-api-session-id: "{{ vc_session.json }}"
+        validate_certs: "{{ vc_validate }}"
+      register: vc_vms
+      delegate_to: localhost
+
+    - name: VM zuordnen
+      ansible.builtin.set_fact:
+        vc_vm_moid: >-
+          {{ (vc_vms.json | selectattr('name', 'match', '(?i)^(' ~ vc_names ~ ')$')
+              | map(attribute='vm') | list + [''])[0] }}
+
+    - name: Abbrechen, wenn die VM fehlt
+      ansible.builtin.fail:
+        msg: >-
+          VM '{{ vm_name | default(inventory_hostname.split('.')[0]) }}' im vCenter
+          {{ vc_host }} nicht gefunden - vm_name im Inventory setzen, fuer
+          physische Hosts snapshot_required=false
+      when: vc_vm_moid | length == 0
+
+    - name: Snapshot anlegen
+      vmware.vmware.vm_snapshot:
+        hostname: "{{ vc_host }}"
+        username: "{{ vm_user }}"
+        password: "{{ vm_password }}"
+        validate_certs: "{{ vc_validate }}"
+        moid: "{{ vc_vm_moid }}"
+        snapshot_name: "{{ snapshot_name }}"
+        description: "{{ snapshot_description | default('') }}"
+        state: present
+        quiesce: false
+        memory_dump: false
+      delegate_to: localhost
+
+    - name: Abmelden
+      ansible.builtin.uri:
+        url: "https://{{ vc_host }}/api/session"
+        method: DELETE
+        headers:
+          vmware-api-session-id: "{{ vc_session.json }}"
+        validate_certs: "{{ vc_validate }}"
+        status_code: [200, 204]
+      delegate_to: localhost
+      failed_when: false

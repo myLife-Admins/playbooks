@@ -1,0 +1,33 @@
+---
+# Stand eines Windows-Hosts fuers Protokoll.
+#
+# Ergebnis: win_host_info mit
+#   os              "Windows Server 2022 Datacenter"
+#   version         "21H2.5761" - Release (2016: 1607, 2019: 1809, ab 2022
+#                   DisplayVersion) und UBR, wie in den Patch-Protokollen
+#   free_gb         freier Platz auf C:, gerundet
+#   pending_reboot  steht ein Neustart aus
+#   now             Uhrzeit am Host, MM/dd/yyyy HH:mm:ss
+
+- name: Stand des Hosts abfragen
+  ansible.windows.win_powershell:
+    script: |
+      $Ansible.Changed = $false
+      $os = Get-CimInstance -ClassName Win32_OperatingSystem
+      $cv = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
+      $rel = if ($cv.DisplayVersion) { $cv.DisplayVersion } else { $cv.ReleaseId }
+      $c = Get-CimInstance -ClassName Win32_LogicalDisk -Filter "DeviceID='C:'"
+      $pending = (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired') -or
+                 (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending')
+      $Ansible.Result = @{
+          os             = ($os.Caption -replace '^Microsoft\s+', '').Trim()
+          version        = '{0}.{1}' -f $rel, $cv.UBR
+          free_gb        = [math]::Round($c.FreeSpace / 1GB)
+          pending_reboot = [bool]$pending
+          now            = (Get-Date).ToString('MM/dd/yyyy HH:mm:ss', [Globalization.CultureInfo]::InvariantCulture)
+      }
+  register: win_host_info_raw
+
+- name: Stand merken
+  ansible.builtin.set_fact:
+    win_host_info: "{{ win_host_info_raw.result }}"

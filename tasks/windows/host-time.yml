@@ -1,0 +1,17 @@
+---
+# Uhrzeit am Host im Format der Patch-Protokolle (MM/dd/yyyy HH:mm:ss).
+# Bewusst die Zeit des Hosts, nicht die des Semaphore-Containers - der
+# laeuft meist in UTC.
+#
+# Ergebnis: win_host_now
+
+- name: Uhrzeit am Host
+  ansible.windows.win_powershell:
+    script: |
+      $Ansible.Changed = $false
+      $Ansible.Result = (Get-Date).ToString('MM/dd/yyyy HH:mm:ss', [Globalization.CultureInfo]::InvariantCulture)
+  register: win_host_now_raw
+
+- name: Uhrzeit merken
+  ansible.builtin.set_fact:
+    win_host_now: "{{ win_host_now_raw.result }}"

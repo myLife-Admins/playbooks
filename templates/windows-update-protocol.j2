@@ -1,0 +1,120 @@
+{#- Protokollblock eines Servers fuer update-windows.yml, im Format der
+    Patch-Protokolle. Die Punkte am Ende (WSUS, Logs, Abmelden, VMTools,
+    Snapshot loeschen) bleiben leer - die fuellt ihr von Hand.
+    Gebaut wird eine Liste von Zeilen, damit die Leerzeichen exakt stimmen. -#}
+{%- set manual_items = ['WSUS Status prüfen', 'Logs > Anwendung', 'Logs > System',
+                        'Abmelden', 'VMTools aktualisiert', 'Snapshot löschen'] -%}
+{%- set ns = namespace(L=[], failed=[]) -%}
+{%- if winupd_manual | default(false) | bool -%}
+{%- set ns.L = ns.L + [
+      winupd_short ~ '():',
+      ' [MANUELL] Dieser Server muss manuell gepatcht werden.',
+      " ToDo: Create Snapshot '' =",
+      ' ToDo: Updates() Installation gestarted =',
+      ' ToDo: Neustart von bis =',
+      ' ToDo: Rescan intern () =',
+      ' ToDo: Festplattenspeicher =',
+      ' ToDo: Versionsupdate von zu ='] -%}
+{%- for m in manual_items -%}{%- set ns.L = ns.L + [' ToDo: ' ~ m ~ ' ='] -%}{%- endfor -%}
+{%- else -%}
+{%- set dry = winupd_dry_run | bool -%}
+{%- set before = winupd_info_before | default({}) -%}
+{%- set after = winupd_info_after | default({}) -%}
+{%- set os = after.os | default(before.os | default('')) -%}
+
+{#- Fehlgeschlagene Updates, die spaeter doch noch drauf kamen, zaehlen nicht -#}
+{%- set installed_ids = winupd_installed | map(attribute='id') | list -%}
+{%- for f in winupd_failed | reverse -%}
+{%- if f.id not in installed_ids and f.id not in (ns.failed | map(attribute='id') | list) -%}
+{%- set ns.failed = ns.failed + [f] -%}
+{%- endif -%}
+{%- endfor -%}
+{%- set failed = ns.failed -%}
+
+{%- macro line(u) -%}
+{%- set k = u.kb | default('') -%}
+{%- set k = (k | first | default('')) if (k is iterable and k is not string) else k -%}
+{%- set b = winupd_sizes[u.id] | default(u.size | default(0)) | int -%}
+{%- set s = (((b / 1073741824) | round | int) ~ 'GB') if b >= 1073741824
+            else ((((b / 1048576) | round | int) ~ 'MB') if b > 0 else '') -%}
+{{ (['KB' ~ k, s, u.title] | select | join(' ')) }}
+{%- endmacro -%}
+
+{%- set ns.L = ns.L + [winupd_short ~ '(' ~ os ~ '):'] -%}
+{%- if winupd_error | length > 0 -%}{%- set ns.L = ns.L + [' FEHLER: ' ~ winupd_error] -%}{%- endif -%}
+
+{#- Snapshot -#}
+{%- if dry -%}{%- set snap = 'Testlauf' -%}
+{%- elif winupd_snapshot | length > 0 -%}{%- set snap = winupd_snapshot -%}
+{%- elif winupd_error | length > 0 -%}{%- set snap = 'FEHLER' -%}
+{%- else -%}{%- set snap = 'nicht noetig (keine Updates)' -%}
+{%- endif -%}
+{%- set ns.L = ns.L + [" ToDo: Create Snapshot '" ~ winupd_snapshot_name ~ "' = " ~ snap] -%}
+
+{#- Updates -#}
+{%- if dry -%}
+{%- set ns.L = ns.L + [' ToDo: Updates(' ~ (winupd_pending | length) ~ ') Installation gestarted  = Testlauf - nur gelistet'] -%}
+{%- for u in winupd_pending -%}{%- set ns.L = ns.L + ['       - ' ~ line(u)] -%}{%- endfor -%}
+{%- else -%}
+{%- set count = (installed_ids | length) + (failed | length) -%}
+{%- if failed | length > 0 -%}{%- set state = 'FEHLER (' ~ (failed | length) ~ ' fehlgeschlagen)' -%}
+{%- elif winupd_error | length > 0 and count == 0 -%}{%- set state = 'FEHLER' -%}
+{%- else -%}{%- set state = 'OK' -%}
+{%- endif -%}
+{%- set ns.L = ns.L + [' ToDo: Updates(' ~ count ~ ') Installation gestarted ' ~ winupd_start ~ ' = ' ~ state] -%}
+{%- for u in winupd_installed -%}
+{%- set ns.L = ns.L + ['       - ' ~ (('[Nachlauf ' ~ u.time ~ '] ') if u.round | int >= 2 else '') ~ line(u)] -%}
+{%- endfor -%}
+{%- for u in failed -%}
+{%- set ns.L = ns.L + ['       - [FEHLER ' ~ (u.failure_hresult_code | default('')) ~ '] ' ~ line(u)] -%}
+{%- endfor -%}
+{%- endif -%}
+{%- set ns.L = ns.L + [''] -%}
+
+{#- Neustart -#}
+{%- if dry -%}
+{%- set r = 'von  bis  = ' ~ ('Neustart steht aus' if before.pending_reboot | default(false) else 'Testlauf') -%}
+{%- elif winupd_reboot_manual | bool -%}
+{%- set r = 'von  bis  = manueller Neustart noetig' -%}
+{%- elif win_reboots | length > 0 -%}
+{%- set r = 'von ' ~ win_reboots[0].from ~ ' bis ' ~ win_reboots[-1].to ~ ' = OK' -%}
+{%- else -%}
+{%- set r = 'von  bis  = nicht noetig' -%}
+{%- endif -%}
+{%- set ns.L = ns.L + [' ToDo: Neustart ' ~ r] -%}
+
+{#- Rescan -#}
+{%- if dry -%}
+{%- set r = '(' ~ (winupd_pending | length) ~ ') = Testlauf' -%}
+{%- elif winupd_rescan.updates is defined -%}
+{%- set left = winupd_rescan.updates | length -%}
+{%- set r = '(' ~ left ~ ') = ' ~ ('OK' if left == 0 else ('nach Neustart wiederholen' if winupd_reboot_manual | bool else 'FEHLER (' ~ left ~ ' offen)')) -%}
+{%- else -%}
+{%- set r = '() = FEHLER (Suche gescheitert)' -%}
+{%- endif -%}
+{%- set ns.L = ns.L + [' ToDo: Rescan intern ' ~ r] -%}
+
+{#- Platz -#}
+{%- set free = after.free_gb | default(before.free_gb | default('')) | string -%}
+{%- if free | length == 0 -%}
+{%- set ns.L = ns.L + [' ToDo: Festplattenspeicher  = FEHLER (nicht ermittelt)'] -%}
+{%- else -%}
+{%- set ns.L = ns.L + [' ToDo: Festplattenspeicher ' ~ free ~ 'GB = ' ~ ('OK' if free | int >= winupd_min_free_gb | int else 'FEHLER (unter ' ~ winupd_min_free_gb ~ 'GB)')] -%}
+{%- endif -%}
+
+{#- Version -#}
+{%- set v1 = before.version | default('') -%}
+{%- set v2 = after.version | default('') -%}
+{%- set cu = winupd_installed | selectattr('title', 'search', '(?i)(Cumulative Update for (Windows|Microsoft server)|Kumulatives Update für (Windows|Microsoft server))') | list -%}
+{%- if dry -%}
+{%- set r = 'von ' ~ v1 ~ ' zu  = Testlauf' -%}
+{%- elif v1 == v2 and cu | length > 0 -%}
+{%- set r = 'von ' ~ v1 ~ ' zu ' ~ v2 ~ ' = PRUEFEN (Build unveraendert)' -%}
+{%- else -%}
+{%- set r = 'von ' ~ v1 ~ ' zu ' ~ v2 ~ ' = OK' -%}
+{%- endif -%}
+{%- set ns.L = ns.L + [' ToDo: Versionsupdate ' ~ r] -%}
+
+{%- for m in manual_items -%}{%- set ns.L = ns.L + [' ToDo: ' ~ m ~ ' = '] -%}{%- endfor -%}
+{%- endif -%}
+{{ ns.L | join('\n') }}

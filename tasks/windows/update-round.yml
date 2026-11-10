@@ -1,0 +1,80 @@
+---
+# Eine Runde aus update-windows.yml: suchen, installieren, bei Bedarf neu
+# starten. Wird mit loop ueber round_idx eingebunden.
+#
+#   Runde 0  nur die Updates aus winupd_first (z.B. Servicing Stack) - die
+#            muessen vor allem anderen drauf sein
+#   Runde 1  alles Uebrige
+#   Runde 2+ "Nachlauf": was erst nach einem Neustart angeboten wird
+#
+# Der Block mit 'when' ist noetig: Die Bedingung an einem include_tasks mit
+# loop wird fuer alle Runden auf einmal ausgewertet, bevor die erste laeuft.
+# Am Block gilt sie fuer jeden Task einzeln - eine fertige Runde stoppt damit
+# die naechsten.
+
+- name: "Runde {{ round_idx }}"
+  when: not (winupd_done | bool)
+  block:
+    - name: "Runde {{ round_idx }} - Updates suchen"
+      ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/windows/search-updates.yml"
+
+    - name: "Runde {{ round_idx }} - Groessen merken"
+      ansible.builtin.set_fact:
+        winupd_sizes: >-
+          {{ winupd_sizes | combine(dict(
+               win_update_search.updates | map(attribute='id') |
+               zip(win_update_search.updates | map(attribute='size')))) }}
+        winupd_round_found: >-
+          {{ win_update_search.updates |
+             selectattr('title', 'search', winupd_first_regex if round_idx | int == 0 else '.')
+             | list | length }}
+
+    - name: "Runde {{ round_idx }} - Updates installieren"
+      ansible.windows.win_updates:
+        category_names: "{{ win_update_categories }}"
+        accept_list: "{{ winupd_first if round_idx | int == 0 else omit }}"
+        state: installed
+        reboot: false
+      register: winupd_round_install
+      when: winupd_round_found | int > 0
+
+    - name: "Runde {{ round_idx }} - Ergebnis merken"
+      ansible.builtin.set_fact:
+        winupd_start: >-
+          {{ winupd_start if winupd_start | length > 0
+             else (win_update_search.now if winupd_round_found | int > 0 else '') }}
+        winupd_installed: >-
+          {{ winupd_installed + (winupd_round_install.updates | default({}) | dict2items |
+             map(attribute='value') | selectattr('installed', 'defined') | selectattr('installed') |
+             map('combine', {'round': round_idx | int, 'time': win_update_search.now}) | list) }}
+        winupd_failed: >-
+          {{ winupd_failed + (winupd_round_install.updates | default({}) | dict2items |
+             map(attribute='value') | selectattr('failed', 'defined') | selectattr('failed') |
+             map('combine', {'round': round_idx | int, 'time': win_update_search.now}) | list) }}
+        winupd_round_reboot: "{{ winupd_round_install.reboot_required | default(false) | bool }}"
+
+    - name: "Runde {{ round_idx }} - Neustart nicht erlaubt, hier aufhoeren"
+      ansible.builtin.set_fact:
+        winupd_reboot_manual: true
+        winupd_done: true
+      when:
+        - winupd_round_reboot | bool
+        - not (winupd_reboot | default(true) | bool)
+
+    - name: "Runde {{ round_idx }} - Neustart"
+      ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/windows/reboot-logged.yml"
+      when:
+        - winupd_round_reboot | bool
+        - winupd_reboot | default(true) | bool
+
+    # Ab Runde 1 ist Schluss, wenn nichts mehr gefunden wurde - oder wenn
+    # nichts installiert und nicht neu gestartet wurde: dann wuerde die
+    # naechste Runde nur dieselben Fehlschlaege wiederholen.
+    - name: "Runde {{ round_idx }} - fertig?"
+      ansible.builtin.set_fact:
+        winupd_done: true
+      when:
+        - round_idx | int > 0
+        - (winupd_round_found | int == 0) or
+          ((winupd_round_install.installed_update_count | default(0) | int == 0) and
+           not (winupd_round_reboot | bool))

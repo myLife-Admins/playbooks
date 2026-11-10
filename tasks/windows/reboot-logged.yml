@@ -1,0 +1,25 @@
+---
+# Startet einen Windows-Host neu und haelt Beginn und Ende fest (Uhrzeit am
+# Host) - fuer die Zeile "Neustart von ... bis ..." im Protokoll.
+#
+# Ergebnis: win_reboots wird um {'from': ..., 'to': ...} ergaenzt.
+# Optional: win_reboot_timeout (Sekunden, Standard 3600 - Server 2016
+#           braucht nach dem kumulativen Update gern 10 Minuten und mehr)
+
+- name: Uhrzeit vor dem Neustart
+  ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/windows/host-time.yml"
+
+- name: Beginn merken
+  ansible.builtin.set_fact:
+    win_reboot_from: "{{ win_host_now }}"
+
+- name: Neu starten
+  ansible.windows.win_reboot:
+    reboot_timeout: "{{ win_reboot_timeout | default(3600) | int }}"
+
+- name: Uhrzeit nach dem Neustart
+  ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/windows/host-time.yml"
+
+- name: Neustart merken
+  ansible.builtin.set_fact:
+    win_reboots: "{{ win_reboots | default([]) + [{'from': win_reboot_from, 'to': win_host_now}] }}"

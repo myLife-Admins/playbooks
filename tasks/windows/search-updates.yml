@@ -1,0 +1,50 @@
+---
+# Sucht anstehende Windows-Updates ueber die Windows-Update-API (also gegen
+# den WSUS, wenn der Host einen hat). Anders als win_updates liefert das die
+# Downloadgroesse fuers Protokoll.
+#
+# Laeuft als SYSTEM: ueber WinRM ist die API sonst teils gesperrt.
+#
+# Eingabe:  win_update_categories - Kategorien wie bei win_updates
+#           (CriticalUpdates, SecurityUpdates, ...; Leerzeichen egal, '*' = alle)
+# Ergebnis: win_update_search mit
+#   updates  Liste mit id, kb, title, size (Bytes), categories
+#   now      Uhrzeit am Host
+
+- name: Updates suchen
+  become: true
+  become_method: runas
+  become_user: SYSTEM
+  ansible.windows.win_powershell:
+    depth: 4
+    parameters:
+      Categories: "{{ win_update_categories }}"
+    script: |
+      param ([string[]]$Categories)
+      $ErrorActionPreference = 'Stop'
+      $Ansible.Changed = $false
+      $want = @($Categories | ForEach-Object { ($_ -replace '\s', '').ToLower() })
+      $session = New-Object -ComObject Microsoft.Update.Session
+      $found = $session.CreateUpdateSearcher().Search("IsInstalled=0 and IsHidden=0 and Type='Software'")
+      $list = @(foreach ($u in $found.Updates) {
+          $cats = @($u.Categories | ForEach-Object { $_.Name })
+          $match = $want -contains '*' -or
+                   @($cats | Where-Object { $want -contains (($_ -replace '\s', '').ToLower()) }).Count -gt 0
+          if (-not $match) { continue }
+          [ordered]@{
+              id         = [string]$u.Identity.UpdateID
+              kb         = [string](@($u.KBArticleIDs) | Select-Object -First 1)
+              title      = [string]$u.Title
+              size       = [int64]$u.MaxDownloadSize
+              categories = $cats
+          }
+      })
+      $Ansible.Result = @{
+          updates = $list
+          now     = (Get-Date).ToString('MM/dd/yyyy HH:mm:ss', [Globalization.CultureInfo]::InvariantCulture)
+      }
+  register: win_update_search_raw
+
+- name: Suchergebnis merken
+  ansible.builtin.set_fact:
+    win_update_search: "{{ win_update_search_raw.result }}"
