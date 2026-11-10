@@ -292,7 +292,7 @@ entscheidet allein der Code.
 ### `update-windows.yml` — Windows-Updates mit Patch-Protokoll
 
 Installiert Windows-Updates auf Servern 2016 bis 2025 und schreibt pro Server
-einen Block im Format der Patch-Protokolle unter `\fs5\IT-Protokolle`.
+einen Block im Format der Patch-Protokolle unter `\\fs5\IT-Protokolle`.
 Vorerst geht das Protokoll per Mail raus (Einstellungen wie bei winget).
 
 **Standard ist ein Testlauf** (`winupd_dry_run: true`): suchen und listen,
