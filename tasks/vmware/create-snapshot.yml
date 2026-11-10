@@ -9,6 +9,12 @@
 #   vcenter_hostname              Standard vcenter1.gutingia.local
 #   vcenter_validate_certs        Standard false (interne CA)
 #   vcenter_vijson_release        Standard 8.0.1.0, siehe unten
+#   snapshot_memory               Standard true: Snapshot mit Arbeitsspeicher.
+#                                 Dauert laenger und belegt auf dem Datastore
+#                                 zusaetzlich so viel Platz wie die VM RAM hat;
+#                                 dafuer kehrt ein Zuruecksetzen in die
+#                                 laufende Maschine zurueck. Bei
+#                                 ausgeschalteten VMs ohne Wirkung.
 #   vm_name                       Name der VM, wenn er weder Kurzname noch
 #                                 FQDN des Hosts ist
 #   snapshot_required=false       Host ohne VM (physisch): nichts tun
@@ -150,7 +156,7 @@
             body:
               name: "{{ snapshot_name }}"
               description: "{{ snapshot_description | default('') }}"
-              memory: false
+              memory: "{{ snapshot_memory | default(true) | bool }}"
               quiesce: false
             validate_certs: "{{ vc_validate }}"
           register: vc_snapshot_task

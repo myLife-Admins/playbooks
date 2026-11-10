@@ -303,7 +303,9 @@ Ablauf pro Server:
 
 1. Snapshot `WSU_<Datum>` im vCenter — nur wenn Updates anstehen. Ohne
    Snapshot keine Updates. Höchstens `winupd_snapshot_parallel` (Standard 2)
-   Snapshots laufen gleichzeitig.
+   Snapshots laufen gleichzeitig. Die Snapshots enthalten den Arbeitsspeicher
+   (`snapshot_memory`, Standard `true`) — sie dauern dadurch länger und
+   brauchen auf dem Datastore zusätzlich so viel Platz, wie die VM RAM hat.
 2. Steht schon ein Neustart aus, zuerst neu starten.
 3. **Runde 0:** nur die Updates aus `winupd_first` (Servicing Stack). Die
    müssen vor allem anderen drauf sein, sonst scheitert der Rest.
