@@ -218,7 +218,14 @@ Variablengruppe in Semaphore, dann für jedes Template wiederverwendbar:
 
 Optional `mail_port` (Standard 25), `mail_secure` (Standard `try`),
 `mail_username` und `mail_password` — Letzteres als Secret der Variablengruppe,
-nicht im Klartext. Ohne `mail_from` ist der Empfänger zugleich Absender.
+nicht im Klartext. Ohne `mail_from` ist der (erste) Empfänger zugleich Absender.
+
+Mehrere Empfänger gehen als Liste oder kommagetrennt, ebenso `mail_cc` und
+`mail_bcc`:
+
+```json
+{"mail_to": ["it@example.de", "chef@example.de"], "mail_cc": "archiv@example.de"}
+```
 
 Der Betreff fasst zusammen, der Text enthält die Berichte pro Host:
 

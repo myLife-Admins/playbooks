@@ -7,8 +7,13 @@
 #   {"mail_host": "smtp.example.local", "mail_to": "it@example.de",
 #    "mail_from": "semaphore@example.de"}
 # Optional: mail_port (25), mail_secure (try), mail_username, mail_password
-# (Passwort als Secret). Ohne mail_from ist der Empfaenger zugleich Absender -
-# das nehmen interne Relays meist an.
+# (Passwort als Secret). Ohne mail_from ist der (erste) Empfaenger zugleich
+# Absender - das nehmen interne Relays meist an.
+#
+# Mehrere Empfaenger: als Liste oder kommagetrennt, beides geht:
+#   "mail_to": ["it@example.de", "chef@example.de"]
+#   "mail_to": "it@example.de, chef@example.de"
+# Optional mail_cc / mail_bcc, gleiche Schreibweise.
 
 - name: Betreff anzeigen
   ansible.builtin.debug:
@@ -22,14 +27,21 @@
   when: mail_to is defined
 
 - name: Bericht per Mail verschicken
+  vars:
+    # Liste oder kommagetrennter Text -> Liste ohne Leerzeichen
+    mail_rcpt: >-
+      {{ (mail_to if mail_to is not string else mail_to.split(','))
+         | map('trim') | select | list }}
   community.general.mail:
     host: "{{ mail_host }}"
     port: "{{ mail_port | default(25) | int }}"
     secure: "{{ mail_secure | default('try') }}"
     username: "{{ mail_username | default(omit) }}"
     password: "{{ mail_password | default(omit) }}"
-    sender: "{{ mail_from | default(mail_to) }}"
-    to: "{{ mail_to }}"
+    sender: "{{ mail_from | default(mail_rcpt | first) }}"
+    to: "{{ mail_rcpt }}"
+    cc: "{{ mail_cc | default(omit) }}"
+    bcc: "{{ mail_bcc | default(omit) }}"
     subject: "{{ report_subject }}"
     body: "{{ report_body }}"
     charset: utf-8
