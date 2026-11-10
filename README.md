@@ -167,9 +167,18 @@ sie am Unterschied zwischen `winget upgrade` und `winget upgrade --include-pinne
 eine Pin-Liste muss dafür nicht gelesen werden. Pins setzt und entfernt man
 am Host mit `winget pin add --id <id>` bzw. `winget pin remove --id <id>`.
 
+**Offline-Hosts sind kein Fehler.** Vor winget prüft das Playbook kurz, ob der
+WinRM-Port antwortet (`winget_reach_timeout`, Standard 5 s, direkt aus dem
+Container). Wer nicht antwortet — ausgeschaltet, Notebook unterwegs, nicht mehr
+im DNS —, gilt als offline: kein Verbindungsfehler im Log, kein Problem, der
+Lauf wird davon nicht rot. In der Mail stehen diese Hosts gesammelt in einer
+Zeile am Ende, im Betreff als „N offline". Antwortet der Port, aber WinRM
+scheitert danach (falsches Passwort, Proxy statt Server), ist das weiterhin
+ein Problem.
+
 Probleme brechen einen Host nicht ab, sondern werden gesammelt: ein
-fehlgeschlagenes Paket, ein nicht erreichbarer Host, fehlendes winget, ein
-Nicht-Windows-Host im Inventory. Rot wird der Lauf erst ganz am Ende, nach dem
+fehlgeschlagenes Paket, ein WinRM-Fehler, fehlendes oder nicht startendes
+winget, ein Nicht-Windows-Host im Inventory. Rot wird der Lauf erst ganz am Ende, nach dem
 Mailversand — sonst käme die Mail ausgerechnet dann nicht, wenn etwas
 schiefgeht. Alle Ergebnisse liegen zusätzlich strukturiert in
 `winget_run.result.packages` (Name, ID, Versionen, Status, Code, Hinweis);
