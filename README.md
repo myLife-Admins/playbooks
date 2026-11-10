@@ -334,9 +334,14 @@ Variablen pro Host oder Gruppe im Inventory:
 vCenter-Zugang wie im alten `update-windows-server.yml` als Variablengruppe:
 `vm_user`, `vm_password` (Secret), optional `vcenter_hostname`
 (Standard `vcenter1.gutingia.local`) und `vcenter_validate_certs` (Standard
-`false`). Die VM wird per REST-API über den Namen gefunden, der Snapshot läuft
-über `vmware.vmware.vm_snapshot`. `vcenter_hostname` muss als FQDN unter
-`NO_PROXY` fallen.
+`false`). Alles läuft über die HTTP-APIs des vCenters mit `ansible.builtin.uri`:
+die VM wird per Automation-API (`/api`) über den Namen gefunden, der Snapshot
+per VI/JSON-API (`/sdk/vim25`, ab vCenter 8.0 Update 1). Bewusst nicht über
+`vmware.vmware.vm_snapshot`: das braucht die Python-Bibliothek `pyvmomi`, die
+im Semaphore-Image fehlt — und nachinstalliert wäre sie beim nächsten
+Image-Update wieder weg. Gibt es den Snapshot mit dem Namen schon (zweiter
+Lauf am selben Tag), wird kein zweiter angelegt. `vcenter_hostname` muss als
+FQDN unter `NO_PROXY` fallen.
 
 Noch nicht drin, was das alte Playbook konnte: Dienste vor dem Patchen stoppen
 und danach starten (`windows_patch_services`) und das Schreiben direkt auf den
@@ -455,7 +460,7 @@ Collections — unter anderem die drei, um die es hier geht:
 | Collection | im Image | wofür |
 |---|---|---|
 | `ansible.windows` | 3.5.0 | `win_updates`, `win_shell`, `win_powershell` |
-| `vmware.vmware` | 2.8.0 | Snapshots über vCenter |
+| `vmware.vmware` | 2.8.0 | derzeit ungenutzt — braucht `pyvmomi`, das im Image fehlt; Snapshots laufen über `uri` |
 | `ansible.posix` | 2.1.0 | `profile_tasks` / `timer` Callbacks |
 
 Grund für das Weglassen: Semaphore ruft den Galaxy-Install **vor jedem Task**

@@ -8,13 +8,20 @@
 # Optional:
 #   vcenter_hostname              Standard vcenter1.gutingia.local
 #   vcenter_validate_certs        Standard false (interne CA)
+#   vcenter_vijson_release        Standard 8.0.1.0, siehe unten
 #   vm_name                       Name der VM, wenn er weder Kurzname noch
 #                                 FQDN des Hosts ist
 #   snapshot_required=false       Host ohne VM (physisch): nichts tun
 #
-# Die VM wird per REST-API ueber den Namen gesucht (Gross-/Kleinschreibung
-# egal), so braucht es weder Ordner noch Datacenter. Der Snapshot selbst
-# laeuft ueber vmware.vmware.vm_snapshot mit der gefundenen MOID.
+# Alles laeuft ueber die HTTP-APIs des vCenters mit ansible.builtin.uri -
+# ohne pyvmomi, das im Semaphore-Image fehlt:
+#   - VM per Automation-API (/api) ueber den Namen suchen, Gross-/Klein-
+#     schreibung egal, ohne Ordner oder Datacenter
+#   - Snapshot per VI/JSON-API (/sdk/vim25), ab vCenter 8.0 Update 1.
+#     vcenter_vijson_release ist die API-Version im Pfad; neuere vCenter
+#     verstehen aeltere Versionen, 8.0.1.0 passt also auch spaeter.
+# Gibt es den Snapshot mit diesem Namen schon (zweiter Lauf am selben Tag),
+# wird kein zweiter angelegt.
 #
 # Proxy: Die Aufrufe laufen im Semaphore-Container. vcenter_hostname muss als
 # FQDN unter NO_PROXY fallen (.gutingia.local), sonst geht es an den Proxy.
@@ -24,6 +31,7 @@
   vars:
     vc_host: "{{ vcenter_hostname | default('vcenter1.gutingia.local') }}"
     vc_validate: "{{ vcenter_validate_certs | default(false) | bool }}"
+    vc_vim: "https://{{ vc_host }}/sdk/vim25/{{ vcenter_vijson_release | default('8.0.1.0') }}"
     vc_names: >-
       {{ [vm_name | default(inventory_hostname.split('.')[0]), inventory_hostname]
          | map('regex_escape') | join('|') }}
@@ -38,7 +46,8 @@
           Fuer Hosts ohne VM: snapshot_required=false
         quiet: true
 
-    - name: vCenter-Anmeldung
+    # --- VM suchen (Automation-API) ----------------------------------------
+    - name: vCenter-Anmeldung (Automation-API)
       ansible.builtin.uri:
         url: "https://{{ vc_host }}/api/session"
         method: POST
@@ -60,6 +69,17 @@
       register: vc_vms
       delegate_to: localhost
 
+    - name: Abmelden (Automation-API)
+      ansible.builtin.uri:
+        url: "https://{{ vc_host }}/api/session"
+        method: DELETE
+        headers:
+          vmware-api-session-id: "{{ vc_session.json }}"
+        validate_certs: "{{ vc_validate }}"
+        status_code: [200, 204]
+      delegate_to: localhost
+      failed_when: false
+
     - name: VM zuordnen
       ansible.builtin.set_fact:
         vc_vm_moid: >-
@@ -74,27 +94,99 @@
           physische Hosts snapshot_required=false
       when: vc_vm_moid | length == 0
 
-    - name: Snapshot anlegen
-      vmware.vmware.vm_snapshot:
-        hostname: "{{ vc_host }}"
-        username: "{{ vm_user }}"
-        password: "{{ vm_password }}"
-        validate_certs: "{{ vc_validate }}"
-        moid: "{{ vc_vm_moid }}"
-        snapshot_name: "{{ snapshot_name }}"
-        description: "{{ snapshot_description | default('') }}"
-        state: present
-        quiesce: false
-        memory_dump: false
-      delegate_to: localhost
-
-    - name: Abmelden
+    # --- Snapshot (VI/JSON-API) --------------------------------------------
+    # Die Sitzungs-Id kommt im Antwort-Header; uri liefert Header klein und
+    # mit _ statt -.
+    - name: vCenter-Anmeldung (VI/JSON)
       ansible.builtin.uri:
-        url: "https://{{ vc_host }}/api/session"
-        method: DELETE
-        headers:
-          vmware-api-session-id: "{{ vc_session.json }}"
+        url: "{{ vc_vim }}/SessionManager/SessionManager/Login"
+        method: POST
+        body_format: json
+        body:
+          userName: "{{ vm_user }}"
+          password: "{{ vm_password }}"
         validate_certs: "{{ vc_validate }}"
-        status_code: [200, 204]
+      register: vc_vim_login
       delegate_to: localhost
-      failed_when: false
+      no_log: true
+
+    - name: Sitzung merken
+      ansible.builtin.set_fact:
+        vc_vim_session: "{{ vc_vim_login.vmware_api_session_id }}"
+      no_log: true
+
+    - name: Snapshot anlegen und Sitzung schliessen
+      block:
+        - name: Vorhandene Snapshots abfragen
+          ansible.builtin.uri:
+            url: "{{ vc_vim }}/VirtualMachine/{{ vc_vm_moid }}/snapshot"
+            headers:
+              vmware-api-session-id: "{{ vc_vim_session }}"
+            validate_certs: "{{ vc_validate }}"
+            status_code: [200, 204]
+          register: vc_snapshots
+          delegate_to: localhost
+
+        # Der Snapshot-Baum ist verschachtelt - fuer "gibt es den Namen schon"
+        # reicht eine Suche im JSON-Text.
+        - name: Gibt es den Snapshot schon?
+          ansible.builtin.set_fact:
+            vc_snapshot_exists: >-
+              {{ (vc_snapshots.json | default({}) | to_json)
+                 is search('"name": ?"' ~ (snapshot_name | regex_escape) ~ '"') }}
+
+        - name: Snapshot schon vorhanden
+          ansible.builtin.debug:
+            msg: "Snapshot '{{ snapshot_name }}' gibt es schon - kein zweiter"
+          when: vc_snapshot_exists | bool
+
+        - name: Snapshot anlegen
+          ansible.builtin.uri:
+            url: "{{ vc_vim }}/VirtualMachine/{{ vc_vm_moid }}/CreateSnapshot_Task"
+            method: POST
+            headers:
+              vmware-api-session-id: "{{ vc_vim_session }}"
+            body_format: json
+            body:
+              name: "{{ snapshot_name }}"
+              description: "{{ snapshot_description | default('') }}"
+              memory: false
+              quiesce: false
+            validate_certs: "{{ vc_validate }}"
+          register: vc_snapshot_task
+          delegate_to: localhost
+          when: not (vc_snapshot_exists | bool)
+
+        - name: Auf den Snapshot warten
+          ansible.builtin.uri:
+            url: "{{ vc_vim }}/Task/{{ vc_snapshot_task.json.value }}/info"
+            headers:
+              vmware-api-session-id: "{{ vc_vim_session }}"
+            validate_certs: "{{ vc_validate }}"
+          register: vc_snapshot_info
+          delegate_to: localhost
+          until: vc_snapshot_info.json.state | default('') in ['success', 'error']
+          retries: 120
+          delay: 5
+          when: not (vc_snapshot_exists | bool)
+
+        - name: Abbrechen, wenn der Snapshot gescheitert ist
+          ansible.builtin.fail:
+            msg: >-
+              Snapshot gescheitert:
+              {{ vc_snapshot_info.json.error.localizedMessage | default(vc_snapshot_info.json.error | default('unbekannt')) }}
+          when:
+            - not (vc_snapshot_exists | bool)
+            - vc_snapshot_info.json.state != 'success'
+
+      always:
+        - name: Abmelden (VI/JSON)
+          ansible.builtin.uri:
+            url: "{{ vc_vim }}/SessionManager/SessionManager/Logout"
+            method: POST
+            headers:
+              vmware-api-session-id: "{{ vc_vim_session }}"
+            validate_certs: "{{ vc_validate }}"
+            status_code: [200, 204]
+          delegate_to: localhost
+          failed_when: false
