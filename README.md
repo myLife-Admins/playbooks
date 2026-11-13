@@ -296,6 +296,49 @@ Für die Codes `0x8A150014`, `0x8A15002B`, `0x8A150101`, `0x8A150109` und
 Bericht. Der Text ist nur Erläuterung — ob ein Paket als Erfolg zählt,
 entscheidet allein der Code.
 
+### `report-user-installs.yml` — Benutzer-Installationen finden
+
+winget als SYSTEM sieht nur Programme, die für den ganzen Rechner installiert
+sind. Was ein Benutzer mit `--scope user` installiert hat, liegt in seinem
+Profil (`HKCU\…\Uninstall`, meist `%LOCALAPPDATA%\Programs`) — das
+aktualisiert `update-winget.yml` nie, und es taucht dort auch nicht auf.
+
+Dieses Playbook ändert nichts, es liest nur: den Uninstall-Zweig jedes
+Benutzerprofils, bei abgemeldeten Benutzern über kurzes Laden der `NTUSER.DAT`.
+Die Mail enthält eine Übersicht nach Programm („2 x Visual Studio Code"), die
+Liste pro Rechner und Benutzer und als Anhang eine CSV zum Abarbeiten
+(Semikolon, mit BOM — öffnet sich in Excel direkt richtig, mit leerer Spalte
+„Erledigt").
+
+Bereinigen von Hand, als der betroffene Benutzer:
+
+```powershell
+winget uninstall --id <id> --scope user
+winget install   --id <id> --scope machine
+```
+
+`user_install_ignore` (Liste von Regex auf den Namen) blendet Programme aus,
+die absichtlich pro Benutzer laufen. Standard: OneDrive und Teams.
+
+**Vorbeugen per GPO:** Die winget-Einstellungen eines Benutzers stehen in
+`%LOCALAPPDATA%\Packages\Microsoft.DesktopAppInstaller_8wekyb3d8bbwe\LocalState\settings.json`.
+Per Gruppenrichtlinien-Einstellung (Dateien, Aktion „Ersetzen") lässt sich dort
+bei der Anmeldung eine Vorgabe verteilen:
+
+```json
+{
+  "$schema": "https://aka.ms/winget-settings.schema.json",
+  "installBehavior": { "preferences": { "scope": "machine" } }
+}
+```
+
+Das ist nur eine Vorgabe — wer `--scope user` ausdrücklich angibt, bekommt es
+trotzdem. Quellen (z.B. ein eigenes Repository) gehören nicht in diese Datei,
+sondern in die administrative Vorlage von App Installer
+(`DesktopAppInstaller.admx`), Einstellungen für zusätzliche und zulässige
+Quellen. Die gilt für den ganzen Rechner — also auch für SYSTEM und damit für
+`update-winget.yml`, das dann mit passendem `winget_source` laufen muss.
+
 ### `update-windows.yml` — Windows-Updates mit Patch-Protokoll
 
 Installiert Windows-Updates auf Servern 2016 bis 2025 und schreibt pro Server
@@ -828,6 +871,7 @@ Im Branch:
 update-apt.yml                  Linux-Programme (apt), dry run als Standard
 update-winget.yml               Windows-Programme (winget), dry run als Standard
 update-windows.yml              Windows-Updates + Patch-Protokoll, dry run als Standard
+report-user-installs.yml        Benutzer-Installationen (--scope user) finden, nur lesen
 pull-playbooks.yml              git pull im Playbook-Ordner
 tasks/
   common/
@@ -841,6 +885,7 @@ tasks/
     search-updates.yml          Updates suchen (WUA, mit Groesse)
     reboot-logged.yml           Neustart mit Beginn/Ende -> win_reboots
     update-round.yml            eine Runde suchen/installieren/neu starten
+    user-installs.yml           Programme mit Scope user aus allen Profilen
   vmware/
     create-snapshot.yml         Snapshot ueber vCenter, VM per Name
 templates/
