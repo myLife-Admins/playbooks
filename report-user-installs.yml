@@ -79,6 +79,7 @@
                'installs': hostvars[item].win_user_installs.installs | default([]),
                'profiles': hostvars[item].win_user_installs.profiles | default(0),
                'errors': hostvars[item].win_user_installs.errors | default([]),
+               'bundles': hostvars[item].win_user_installs.bundles | default([]),
                'problem': hostvars[item].uinst_error
                           if hostvars[item].uinst_error is defined
                           else 'kein Ergebnis - Host hat den Lauf nicht erreicht'
@@ -127,6 +128,9 @@
           {% endif %}
           {% for e in h.errors %}
           HINWEIS: {{ e }}
+          {% endfor %}
+          {% for b in h.bundles %}
+          OK, ausgeblendet: {{ b }} - fuer den Rechner installiert, nur der Installer hat sich beim Benutzer eingetragen
           {% endfor %}
           {% for i in h.installs %}
           {{ '%-14s %-32s %-40s %-16s %s' | format(i.user, (i.id or '-')[:32], i.name[:40], i.version[:16], i.location) }}

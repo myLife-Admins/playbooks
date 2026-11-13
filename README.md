@@ -324,6 +324,14 @@ winget uninstall --id <id> --scope user
 winget install   --id <id> --scope machine
 ```
 
+**Installer-Einträge sind kein Benutzer-Programm.** Manche Installer (WiX
+„Burn", z.B. Python) tragen sich selbst immer beim Benutzer ein, der sie
+gestartet hat — auch bei `--scope machine`; das eigentliche Programm steht dann
+als versteckte Systemkomponenten unter HKLM. Solche Einträge (erkennbar an
+`BundleCachePath`) blendet das Playbook aus, wenn es unter HKLM ein Programm
+mit demselben Namensanfang und derselben Version gibt, und meldet sie als
+„OK, ausgeblendet".
+
 `user_install_ignore` (Liste von Regex auf den Namen) blendet Programme aus,
 die absichtlich pro Benutzer laufen. Standard: OneDrive und Teams.
 

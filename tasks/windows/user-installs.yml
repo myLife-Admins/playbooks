@@ -23,6 +23,9 @@
 #             Installer), key (Registry-Schluessel)
 #   profiles  Zahl der gelesenen Profile
 #   errors    Profile, die sich nicht lesen liessen
+#   bundles   ausgeblendete Installer-Eintraege ("benutzer: name"): Programm
+#             ist fuer den Rechner installiert, nur der Installer (WiX Burn,
+#             z.B. Python) hat sich beim Benutzer eingetragen
 
 - name: Benutzer-Installationen auslesen
   become: true
@@ -114,8 +117,18 @@
       $profiles = @(Get-CimInstance -ClassName Win32_UserProfile |
           Where-Object { -not $_.Special -and $_.LocalPath -and $_.SID -like 'S-1-5-21-*' })
 
+      # Alles, was fuer den Rechner installiert ist (auch versteckte
+      # Systemkomponenten) - fuer den Abgleich der Installer-Eintraege unten.
+      $machine = @(foreach ($k in $keys) {
+          Get-ChildItem -LiteralPath "Registry::HKEY_LOCAL_MACHINE\$k" -ErrorAction SilentlyContinue |
+              ForEach-Object { Get-ItemProperty -LiteralPath $_.PSPath -ErrorAction SilentlyContinue } |
+              Where-Object { $_.DisplayName } |
+              ForEach-Object { [pscustomobject]@{ name = [string]$_.DisplayName; version = [string]$_.DisplayVersion } }
+      })
+
       $installs = @()
       $errors = @()
+      $bundles = @()
       $read = 0
       foreach ($p in $profiles) {
           $user = Split-Path $p.LocalPath -Leaf
@@ -151,6 +164,24 @@
                       if ($v.SystemComponent -eq 1 -or $v.ParentKeyName) { continue }
                       $name = [string]$v.DisplayName
                       if (@($Ignore | Where-Object { $name -match $_ }).Count -gt 0) { continue }
+                      # Installer nach WiX Burn (z.B. Python) tragen sich
+                      # selbst immer beim Benutzer ein, der sie gestartet hat -
+                      # auch wenn das Programm fuer den ganzen Rechner
+                      # installiert wurde. Erkennbar an BundleCachePath; das
+                      # eigentliche Programm steht dann in derselben Version
+                      # unter HKLM ("Python 3.15.2 Core Interpreter (64-bit)"
+                      # zum Eintrag "Python 3.15.2 (64-bit)").
+                      if ($v.BundleCachePath -or $v.BundleProviderKey) {
+                          $stem = ($name -replace '\s*\([^)]*\)\s*$', '').Trim()
+                          $hit = @($machine | Where-Object {
+                              $_.version -eq [string]$v.DisplayVersion -and
+                              $_.name.StartsWith($stem, [StringComparison]::OrdinalIgnoreCase)
+                          })
+                          if ($stem -and $hit.Count -gt 0) {
+                              $bundles += "$user`: $name"
+                              continue
+                          }
+                      }
                       $key = [string]$sub.PSChildName
                       $installs += [ordered]@{
                           user      = $user
@@ -183,6 +214,7 @@
           installs = @($installs | Sort-Object { $_.user }, { $_.name })
           profiles = $read
           errors   = $errors
+          bundles  = $bundles
       }
   register: win_user_installs_raw
 
