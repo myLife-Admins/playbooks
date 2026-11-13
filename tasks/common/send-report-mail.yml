@@ -1,7 +1,9 @@
 ---
 # Verschickt einen Bericht per Mail, sofern mail_to gesetzt ist.
 #
-# Eingabe: report_subject, report_body
+# Eingabe:  report_subject, report_body
+# Optional: report_attach - Liste von Dateien im Semaphore-Container, die
+#           angehaengt werden
 #
 # Mail-Einstellungen am bequemsten als Variablengruppe in Semaphore:
 #   {"mail_host": "smtp.example.local", "mail_to": "it@example.de",
@@ -44,6 +46,7 @@
     bcc: "{{ mail_bcc | default(omit) }}"
     subject: "{{ report_subject }}"
     body: "{{ report_body }}"
+    attach: "{{ report_attach | default(omit) }}"
     charset: utf-8
   when: mail_to is defined
 

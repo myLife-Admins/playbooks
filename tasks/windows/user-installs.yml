@@ -1,0 +1,111 @@
+---
+# Liest Programme, die nur fuer einen Benutzer installiert sind (z.B.
+# 'winget install --scope user'), aus allen Benutzerprofilen eines Hosts.
+# Die sieht winget als SYSTEM nicht - update-winget.yml aktualisiert sie
+# deshalb nie.
+#
+# Gelesen wird der Uninstall-Zweig in der Registry jedes Profils. Bei
+# angemeldeten Benutzern direkt unter HKEY_USERS, bei abgemeldeten wird
+# NTUSER.DAT kurz geladen und wieder entladen. Laeuft als SYSTEM.
+#
+# Optional: user_install_ignore - Liste von Regex auf den Programmnamen,
+#           die nicht gemeldet werden (Programme, die absichtlich pro
+#           Benutzer laufen, z.B. OneDrive)
+# Ergebnis: win_user_installs mit
+#   installs  Liste mit user, name, version, publisher, location,
+#             uninstall, installed (Datum laut Installer)
+#   profiles  Zahl der gelesenen Profile
+#   errors    Profile, die sich nicht lesen liessen
+
+- name: Benutzer-Installationen auslesen
+  become: true
+  become_method: runas
+  become_user: SYSTEM
+  ansible.windows.win_powershell:
+    depth: 4
+    parameters:
+      Ignore: "{{ user_install_ignore | default(['^Microsoft OneDrive$', '^Microsoft Teams( classic)?$']) }}"
+    script: |
+      param ([string[]]$Ignore = @())
+      $ErrorActionPreference = 'Continue'
+      $Ansible.Changed = $false
+
+      $keys = @(
+          'Software\Microsoft\Windows\CurrentVersion\Uninstall',
+          'Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall'
+      )
+      # Nur echte Benutzerkonten (lokal und Domaene), keine Dienstkonten
+      $profiles = @(Get-CimInstance -ClassName Win32_UserProfile |
+          Where-Object { -not $_.Special -and $_.LocalPath -and $_.SID -like 'S-1-5-21-*' })
+
+      $installs = @()
+      $errors = @()
+      $read = 0
+      foreach ($p in $profiles) {
+          $user = Split-Path $p.LocalPath -Leaf
+          $root = "Registry::HKEY_USERS\$($p.SID)"
+          $mount = $null
+          if (-not (Test-Path -LiteralPath $root)) {
+              $dat = Join-Path $p.LocalPath 'NTUSER.DAT'
+              $exists = Test-Path -LiteralPath $dat -ErrorAction SilentlyContinue -ErrorVariable testErr
+              if ($testErr) {
+                  $errors += "Profil $user nicht lesbar: $($testErr[0].Exception.Message)"
+                  continue
+              }
+              if (-not $exists) { continue }
+              $mount = 'AnsibleUserScan_' + ($p.SID -replace '\W', '_')
+              $out = & reg.exe load "HKU\$mount" "$dat" 2>&1
+              if ($LASTEXITCODE -ne 0) {
+                  $errors += "Profil $user nicht lesbar: $(($out | Out-String).Trim())"
+                  continue
+              }
+              $root = "Registry::HKEY_USERS\$mount"
+          }
+          $read++
+          try {
+              foreach ($k in $keys) {
+                  $base = Join-Path $root $k
+                  if (-not (Test-Path -LiteralPath $base)) { continue }
+                  foreach ($sub in @(Get-ChildItem -LiteralPath $base -ErrorAction SilentlyContinue)) {
+                      $v = Get-ItemProperty -LiteralPath $sub.PSPath -ErrorAction SilentlyContinue
+                      # Ohne Namen, Systemkomponenten und Teil-Updates sind
+                      # keine eigenstaendigen Programme
+                      if (-not $v -or -not $v.DisplayName) { continue }
+                      if ($v.SystemComponent -eq 1 -or $v.ParentKeyName) { continue }
+                      $name = [string]$v.DisplayName
+                      if (@($Ignore | Where-Object { $name -match $_ }).Count -gt 0) { continue }
+                      $installs += [ordered]@{
+                          user      = $user
+                          name      = $name.Trim()
+                          version   = [string]$v.DisplayVersion
+                          publisher = [string]$v.Publisher
+                          location  = ([string]$v.InstallLocation).Trim('"', ' ')
+                          uninstall = [string]$v.UninstallString
+                          installed = [string]$v.InstallDate
+                      }
+                  }
+              }
+          } finally {
+              if ($mount) {
+                  # Offene Registry-Handles der PowerShell verhindern sonst
+                  # das Entladen
+                  [GC]::Collect()
+                  [GC]::WaitForPendingFinalizers()
+                  $out = & reg.exe unload "HKU\$mount" 2>&1
+                  if ($LASTEXITCODE -ne 0) {
+                      $errors += "Profil $user nicht entladen (HKU\$mount): $(($out | Out-String).Trim())"
+                  }
+              }
+          }
+      }
+
+      $Ansible.Result = @{
+          installs = @($installs | Sort-Object { $_.user }, { $_.name })
+          profiles = $read
+          errors   = $errors
+      }
+  register: win_user_installs_raw
+
+- name: Ergebnis merken
+  ansible.builtin.set_fact:
+    win_user_installs: "{{ win_user_installs_raw.result }}"

@@ -1,0 +1,164 @@
+---
+# Findet Programme, die nur fuer einen Benutzer installiert sind (z.B.
+# 'winget install --scope user'). winget als SYSTEM sieht sie nicht -
+# update-winget.yml aktualisiert sie deshalb nie. Sie muessen von Hand
+# entfernt und fuer den ganzen Rechner neu installiert werden:
+#   winget uninstall --id <id> --scope user
+#   winget install   --id <id> --scope machine
+#
+# Aendert nichts, liest nur. Ergebnis pro Rechner und Benutzer im Log und per
+# Mail, dazu eine CSV im Anhang zum Abarbeiten (Rechner, Benutzer, Programm,
+# Version, Pfad, Deinstallationsbefehl).
+#
+# Optional (Extra-Var oder Inventory):
+#   user_install_ignore  Liste von Regex auf den Programmnamen, die nicht
+#                        gemeldet werden. Standard: OneDrive und Teams, die
+#                        laufen absichtlich pro Benutzer.
+#
+# Mail wie bei update-winget.yml: mail_host, mail_to usw.
+
+- name: Benutzer-Installationen auslesen
+  hosts: "{{ target_hosts | default('all') }}"
+  gather_facts: false
+
+  tasks:
+    - name: Hosts dieses Laufs merken
+      ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/common/remember-run-hosts.yml"
+
+    - name: Ausgangswerte setzen
+      ansible.builtin.set_fact:
+        host_offline: false
+        uinst_error: ''
+        win_user_installs: {}
+
+    - name: Erreichbarkeit pruefen
+      ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/common/check-reachable.yml"
+
+    - name: Auslesen
+      when: not (host_offline | bool)
+      block:
+        - name: Kein Windows-Host
+          ansible.builtin.fail:
+            msg: >-
+              kein Windows-Host (ansible_connection={{ ansible_connection | default('ssh') }})
+              - im Inventory ansible_connection=winrm setzen
+          when: (ansible_connection | default('ssh')) not in ['winrm', 'psrp']
+
+        - name: Benutzer-Installationen auslesen
+          ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/windows/user-installs.yml"
+
+      rescue:
+        - name: Fehler merken
+          ansible.builtin.set_fact:
+            uinst_error: "{{ ansible_failed_result.msg | default('unbekannter Fehler') }}"
+
+    - name: Ergebnis
+      ansible.builtin.debug:
+        msg: >-
+          {{ win_user_installs.installs | default([])
+             | map(attribute='user') | zip(win_user_installs.installs | default([]) | map(attribute='name'))
+             | map('join', ': ') | list }}
+      when: not (host_offline | bool)
+
+
+- name: Bericht verschicken
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+    uinst_csv: "{{ lookup('ansible.builtin.env', 'TMPDIR') | default('/tmp', true) }}/benutzer-installationen-{{ now(fmt='%Y-%m-%d') }}.csv"
+
+  tasks:
+    - name: Ergebnisse aller Hosts einsammeln
+      ansible.builtin.set_fact:
+        report_results: >-
+          {{ report_results | default([]) + [{
+               'host': item,
+               'short': item.split('.')[0] | lower,
+               'offline': hostvars[item].host_offline | default(false) | bool,
+               'installs': hostvars[item].win_user_installs.installs | default([]),
+               'profiles': hostvars[item].win_user_installs.profiles | default(0),
+               'errors': hostvars[item].win_user_installs.errors | default([]),
+               'problem': hostvars[item].uinst_error
+                          if hostvars[item].uinst_error is defined
+                          else 'kein Ergebnis - Host hat den Lauf nicht erreicht'
+             }] }}
+      loop: "{{ report_hosts | default([]) }}"
+
+    - name: Betreff und Text zusammenstellen
+      ansible.builtin.set_fact:
+        report_subject: >-
+          {%- set r = report_results | default([]) -%}
+          {%- set online = r | rejectattr('offline') | list -%}
+          {%- set n = online | map(attribute='installs') | map('length') | sum -%}
+          {%- set hosts_with = online | selectattr('installs') | list | length -%}
+          {%- set off = r | selectattr('offline') | list | length -%}
+          {%- set problems = r | selectattr('problem') | list | length -%}
+          [Benutzer-Installationen] {{ r | length }} Host(s):
+          {{ n }} Installation(en) auf {{ hosts_with }} Host(s)
+          {%- if off %}, {{ off }} offline{% endif -%}
+          {%- if problems %} - {{ problems }} mit Problem{% endif -%}
+        report_body: |-
+          {%- set r = report_results | default([]) -%}
+          {%- set online = r | rejectattr('offline') | list -%}
+          {%- set all = online | map(attribute='installs') | flatten | map(attribute='name') | list -%}
+          Programme, die nur fuer einen Benutzer installiert sind. winget als SYSTEM
+          sieht sie nicht, update-winget.yml aktualisiert sie also nie.
+          Bereinigen: als Benutzer deinstallieren, dann fuer den Rechner neu
+          installieren (winget install --id <id> --scope machine).
+          Zum Abarbeiten liegt die Liste als CSV im Anhang.
+
+          === Nach Programm ===
+          {% for name, n in all | community.general.counter | dictsort(by='value', reverse=true) %}
+            {{ '%4d' | format(n) }} x {{ name }}
+          {% else %}
+            keine gefunden
+          {% endfor %}
+          {% for h in online %}
+
+          === {{ h.short }} ({{ h.installs | length }}, {{ h.profiles }} Profil(e) gelesen) ===
+          {% if h.problem %}
+          PROBLEM: {{ h.problem }}
+          {% endif %}
+          {% for e in h.errors %}
+          HINWEIS: {{ e }}
+          {% endfor %}
+          {% for i in h.installs %}
+          {{ '%-14s %-45s %-16s %s' | format(i.user, i.name[:45], i.version[:16], i.location) }}
+          {% endfor %}
+          {% endfor %}
+          {% set off = r | selectattr('offline') | map(attribute='host') | list %}
+          {% if off %}
+
+          === Offline ({{ off | length }}) - ausgeschaltet oder nicht im DNS ===
+          {% for h in off %}
+            - {{ h }}
+          {% endfor %}
+          {% endif %}
+
+    # Semikolon und BOM: Excel oeffnet die Datei mit deutschen Einstellungen
+    # dann direkt richtig, Umlaute inklusive.
+    - name: CSV schreiben
+      ansible.builtin.copy:
+        dest: "{{ uinst_csv }}"
+        mode: '0600'
+        content: |-
+          {{ '﻿' }}Rechner;Benutzer;Programm;Version;Hersteller;Installiert;Pfad;Deinstallation;Erledigt
+          {% for h in report_results | default([]) | rejectattr('offline') %}
+          {% for i in h.installs %}
+          {{ [h.short, i.user, i.name, i.version, i.publisher, i.installed, i.location, i.uninstall, ''] | map('string') | map('replace', '"', '""') | map('regex_replace', '^', '"') | map('regex_replace', '$', '"') | join(';') }}
+          {% endfor %}
+          {% endfor %}
+
+    - name: Bericht per Mail verschicken
+      ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/common/send-report-mail.yml"
+      vars:
+        report_attach: ["{{ uinst_csv }}"]
+
+    - name: CSV wieder entfernen
+      ansible.builtin.file:
+        path: "{{ uinst_csv }}"
+        state: absent
+
+    - name: Lauf scheitern lassen, wenn es Probleme gab
+      ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/common/fail-on-problems.yml"
