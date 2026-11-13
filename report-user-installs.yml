@@ -101,14 +101,19 @@
         report_body: |-
           {%- set r = report_results | default([]) -%}
           {%- set online = r | rejectattr('offline') | list -%}
-          {%- set all = online | map(attribute='installs') | flatten | map(attribute='name') | list -%}
+          {%- set flat = online | map(attribute='installs') | flatten -%}
+          {%- set all = (flat | selectattr('id') | map(attribute='id') | list)
+                      + (flat | rejectattr('id') | map(attribute='name') | map('regex_replace', '$', '  (ohne winget-ID)') | list) -%}
           Programme, die nur fuer einen Benutzer installiert sind. winget als SYSTEM
           sieht sie nicht, update-winget.yml aktualisiert sie also nie.
-          Bereinigen: als Benutzer deinstallieren, dann fuer den Rechner neu
-          installieren (winget install --id <id> --scope machine).
-          Zum Abarbeiten liegt die Liste als CSV im Anhang.
+          Bereinigen, als der betroffene Benutzer:
+            winget uninstall --id <ID> --exact --scope user
+            winget install   --id <ID> --exact --scope machine
+          Zum Abarbeiten liegt die Liste als CSV im Anhang, mit fertigen Befehlen.
+          Ohne winget-ID: von Hand installiert, Deinstallation ueber
+          "Apps & Features" bzw. den Befehl in der CSV.
 
-          === Nach Programm ===
+          === Nach Programm (winget-ID) ===
           {% for name, n in all | community.general.counter | dictsort(by='value', reverse=true) %}
             {{ '%4d' | format(n) }} x {{ name }}
           {% else %}
@@ -124,7 +129,7 @@
           HINWEIS: {{ e }}
           {% endfor %}
           {% for i in h.installs %}
-          {{ '%-14s %-45s %-16s %s' | format(i.user, i.name[:45], i.version[:16], i.location) }}
+          {{ '%-14s %-32s %-40s %-16s %s' | format(i.user, (i.id or '-')[:32], i.name[:40], i.version[:16], i.location) }}
           {% endfor %}
           {% endfor %}
           {% set off = r | selectattr('offline') | map(attribute='host') | list %}
@@ -143,10 +148,12 @@
         dest: "{{ uinst_csv }}"
         mode: '0600'
         content: |-
-          {{ '﻿' }}Rechner;Benutzer;Programm;Version;Hersteller;Installiert;Pfad;Deinstallation;Erledigt
+          {{ '﻿' }}Rechner;Benutzer;Programm;winget-ID;Version;Hersteller;Installiert;Pfad;Deinstallation;winget-Befehle;Erledigt
           {% for h in report_results | default([]) | rejectattr('offline') %}
           {% for i in h.installs %}
-          {{ [h.short, i.user, i.name, i.version, i.publisher, i.installed, i.location, i.uninstall, ''] | map('string') | map('replace', '"', '""') | map('regex_replace', '^', '"') | map('regex_replace', '$', '"') | join(';') }}
+          {{ [h.short, i.user, i.name, i.id, i.version, i.publisher, i.installed, i.location, i.uninstall,
+                ('winget uninstall --id ' ~ i.id ~ ' --exact --scope user; winget install --id ' ~ i.id ~ ' --exact --scope machine') if i.id else '',
+                ''] | map('string') | map('replace', '"', '""') | map('regex_replace', '^', '"') | map('regex_replace', '$', '"') | join(';') }}
           {% endfor %}
           {% endfor %}
 

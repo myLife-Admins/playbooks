@@ -305,10 +305,17 @@ aktualisiert `update-winget.yml` nie, und es taucht dort auch nicht auf.
 
 Dieses Playbook ändert nichts, es liest nur: den Uninstall-Zweig jedes
 Benutzerprofils, bei abgemeldeten Benutzern über kurzes Laden der `NTUSER.DAT`.
-Die Mail enthält eine Übersicht nach Programm („2 x Visual Studio Code"), die
-Liste pro Rechner und Benutzer und als Anhang eine CSV zum Abarbeiten
-(Semikolon, mit BOM — öffnet sich in Excel direkt richtig, mit leerer Spalte
-„Erledigt").
+Die Mail enthält eine Übersicht nach winget-ID („2 x Microsoft.VisualStudioCode"),
+die Liste pro Rechner und Benutzer und als Anhang eine CSV zum Abarbeiten
+(Semikolon, mit BOM — öffnet sich in Excel direkt richtig) mit fertigen
+winget-Befehlen und einer leeren Spalte „Erledigt".
+
+Die winget-ID steht nicht in der Registry. winget führt aber pro Benutzer eine
+eigene Liste der Pakete, die es installiert hat (`installed.db` unter
+`…\LocalState\Microsoft.Winget.Source_8wekyb3d8bbwe\`), samt Registry-Schlüssel
+des Programms — darüber wird zugeordnet. Was nicht über winget kam, steht
+„ohne winget-ID" im Bericht; dafür gibt es den Deinstallationsbefehl aus der
+Registry.
 
 Bereinigen von Hand, als der betroffene Benutzer:
 

@@ -11,9 +11,16 @@
 # Optional: user_install_ignore - Liste von Regex auf den Programmnamen,
 #           die nicht gemeldet werden (Programme, die absichtlich pro
 #           Benutzer laufen, z.B. OneDrive)
+# winget-ID: Die Registry kennt sie nicht. winget fuehrt aber pro Benutzer
+# eine eigene Liste der Pakete, die es installiert hat (installed.db, SQLite)
+# - mit dem Registry-Schluessel des Programms. Darueber wird zugeordnet,
+# gelesen per winsqlite3.dll wie die Pins in update-winget.yml. Programme,
+# die nicht per winget kamen (Installer von Hand), haben keine ID.
+#
 # Ergebnis: win_user_installs mit
-#   installs  Liste mit user, name, version, publisher, location,
-#             uninstall, installed (Datum laut Installer)
+#   installs  Liste mit user, name, id (winget, sonst leer), version,
+#             publisher, location, uninstall, installed (Datum laut
+#             Installer), key (Registry-Schluessel)
 #   profiles  Zahl der gelesenen Profile
 #   errors    Profile, die sich nicht lesen liessen
 
@@ -29,6 +36,75 @@
       param ([string[]]$Ignore = @())
       $ErrorActionPreference = 'Continue'
       $Ansible.Changed = $false
+
+      # --- SQLite ueber die winsqlite3.dll von Windows ---------------------
+      $sqliteOk = $true
+      try {
+          if (-not ('WgSqlite' -as [type])) {
+              Add-Type -TypeDefinition @'
+      using System;
+      using System.Runtime.InteropServices;
+      public static class WgSqlite {
+          [DllImport("winsqlite3.dll", CharSet = CharSet.Unicode)]
+          public static extern int sqlite3_open16(string file, out IntPtr db);
+          [DllImport("winsqlite3.dll")]
+          public static extern int sqlite3_close(IntPtr db);
+          [DllImport("winsqlite3.dll", CharSet = CharSet.Unicode)]
+          public static extern int sqlite3_prepare16_v2(IntPtr db, string sql, int len, out IntPtr stmt, IntPtr tail);
+          [DllImport("winsqlite3.dll")]
+          public static extern int sqlite3_step(IntPtr stmt);
+          [DllImport("winsqlite3.dll")]
+          public static extern IntPtr sqlite3_column_text16(IntPtr stmt, int col);
+          [DllImport("winsqlite3.dll")]
+          public static extern int sqlite3_finalize(IntPtr stmt);
+      }
+      '@
+          }
+      } catch {
+          $sqliteOk = $false
+      }
+
+      # Registry-Schluessel (klein) -> winget-ID aus der installed.db eines
+      # Profils. An einer Kopie, damit ein offenes winget nicht stoert; die
+      # -wal-Datei gehoert dazu, sonst fehlen die neuesten Eintraege.
+      function Get-WingetIds {
+          param ([string]$ProfilePath)
+          $map = @{}
+          if (-not $sqliteOk) { return $map }
+          $db = Join-Path $ProfilePath 'AppData\Local\Packages\Microsoft.DesktopAppInstaller_8wekyb3d8bbwe\LocalState\Microsoft.Winget.Source_8wekyb3d8bbwe\installed.db'
+          if (-not (Test-Path -LiteralPath $db -ErrorAction SilentlyContinue)) { return $map }
+          $copy = Join-Path $env:TEMP ('installed_{0}.db' -f [guid]::NewGuid())
+          try {
+              Copy-Item -LiteralPath $db -Destination $copy -ErrorAction Stop
+              foreach ($ext in '-wal', '-shm') {
+                  if (Test-Path -LiteralPath ($db + $ext)) {
+                      Copy-Item -LiteralPath ($db + $ext) -Destination ($copy + $ext) -ErrorAction SilentlyContinue
+                  }
+              }
+              $h = [IntPtr]::Zero
+              $st = [IntPtr]::Zero
+              if ([WgSqlite]::sqlite3_open16($copy, [ref]$h) -ne 0) { return $map }
+              try {
+                  $sql = 'SELECT pc.productcode, i.id FROM productcodes_map pm ' +
+                         'JOIN productcodes pc ON pc.rowid = pm.productcode ' +
+                         'JOIN manifest m ON m.rowid = pm.manifest ' +
+                         'JOIN ids i ON i.rowid = m.id'
+                  if ([WgSqlite]::sqlite3_prepare16_v2($h, $sql, -1, [ref]$st, [IntPtr]::Zero) -ne 0) { return $map }
+                  while ([WgSqlite]::sqlite3_step($st) -eq 100) {
+                      $code = [Runtime.InteropServices.Marshal]::PtrToStringUni([WgSqlite]::sqlite3_column_text16($st, 0))
+                      $id = [Runtime.InteropServices.Marshal]::PtrToStringUni([WgSqlite]::sqlite3_column_text16($st, 1))
+                      if ($code) { $map[$code.ToLower()] = $id }
+                  }
+              } finally {
+                  if ($st -ne [IntPtr]::Zero) { [void][WgSqlite]::sqlite3_finalize($st) }
+                  [void][WgSqlite]::sqlite3_close($h)
+              }
+          } catch {
+          } finally {
+              Remove-Item -LiteralPath $copy, ($copy + '-wal'), ($copy + '-shm') -Force -ErrorAction SilentlyContinue
+          }
+          $map
+      }
 
       $keys = @(
           'Software\Microsoft\Windows\CurrentVersion\Uninstall',
@@ -62,6 +138,7 @@
               $root = "Registry::HKEY_USERS\$mount"
           }
           $read++
+          $ids = Get-WingetIds -ProfilePath $p.LocalPath
           try {
               foreach ($k in $keys) {
                   $base = Join-Path $root $k
@@ -74,9 +151,12 @@
                       if ($v.SystemComponent -eq 1 -or $v.ParentKeyName) { continue }
                       $name = [string]$v.DisplayName
                       if (@($Ignore | Where-Object { $name -match $_ }).Count -gt 0) { continue }
+                      $key = [string]$sub.PSChildName
                       $installs += [ordered]@{
                           user      = $user
                           name      = $name.Trim()
+                          id        = [string]$ids[$key.ToLower()]
+                          key       = $key
                           version   = [string]$v.DisplayVersion
                           publisher = [string]$v.Publisher
                           location  = ([string]$v.InstallLocation).Trim('"', ' ')
