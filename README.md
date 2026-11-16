@@ -908,6 +908,9 @@ templates/
 vars/
   windows-update.yml            Einstellungen fuer update-windows.yml
 README.md
+HANDOVER.md                     Uebergabe: Stand, Regeln, Stolperfallen, offene Punkte
+.github/
+  copilot-instructions.md       Regeln, die GitHub Copilot automatisch laedt
 .gitignore
 ```
 
