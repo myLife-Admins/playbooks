@@ -3,15 +3,20 @@
 # Bewusst die Zeit des Hosts, nicht die des Semaphore-Containers - der
 # laeuft meist in UTC.
 #
-# Ergebnis: win_host_now
+# Ergebnis: win_host_now (Ortszeit) und win_host_now_utc (UTC, ISO 8601)
 
 - name: Uhrzeit am Host
   ansible.windows.win_powershell:
     script: |
       $Ansible.Changed = $false
-      $Ansible.Result = (Get-Date).ToString('MM/dd/yyyy HH:mm:ss', [Globalization.CultureInfo]::InvariantCulture)
+      $now = Get-Date
+      $Ansible.Result = @{
+          local = $now.ToString('MM/dd/yyyy HH:mm:ss', [Globalization.CultureInfo]::InvariantCulture)
+          utc   = $now.ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", [Globalization.CultureInfo]::InvariantCulture)
+      }
   register: win_host_now_raw
 
 - name: Uhrzeit merken
   ansible.builtin.set_fact:
-    win_host_now: "{{ win_host_now_raw.result }}"
+    win_host_now: "{{ win_host_now_raw.result.local }}"
+    win_host_now_utc: "{{ win_host_now_raw.result.utc }}"

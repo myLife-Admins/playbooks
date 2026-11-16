@@ -15,7 +15,8 @@
 #   4. Runde 1: alles Uebrige, Neustart wenn noetig
 #   5. Nachlauf: suchen - neu starten - suchen, bis nichts mehr kommt
 #      (einige Updates werden erst nach einem Neustart angeboten)
-#   6. Rescan, Version und freier Platz fuer das Protokoll
+#   6. Ereignisse aus Application und System fuer die Patchzeit sammeln
+#   7. Rescan, Version und freier Platz fuer das Protokoll
 #
 # Im Protokoll fuellt das Playbook die Punkte mit OK/FEHLER. Die Punkte, hinter
 # die ihr von Hand Uhrzeit und Datum schreibt (WSUS-Status, Logs, Abmelden,
@@ -49,9 +50,9 @@
 #   1. Vorbereitung   alle Hosts parallel: erreichbar? Stand, Updates suchen
 #   2. Snapshots      serial: hoechstens winupd_snapshot_parallel gleichzeitig
 #   3. Installation   alle Hosts parallel, danach Protokoll pro Host
-#   4. Versand        Mail mit allen Protokollen
-# Ein Fehler in einem Play landet in winupd_error; die folgenden Plays fassen
-# den Host dann nicht mehr an, das Protokoll schreibt Play 3 trotzdem.
+#   4. Versand        Protokoll-Mail und separate Ereignis-Mail
+# Ein Fehler vor der Installation verhindert den Patch. Nach einem
+# gestarteten Patch werden die Ereignisprotokolle auch bei Fehlern gesammelt.
 
 - name: Windows-Updates - Vorbereitung
   hosts: "{{ target_hosts | default('all') }}"
@@ -80,6 +81,10 @@
         winupd_info_before: {}
         winupd_info_after: {}
         winupd_rescan: {}
+        winupd_log_start_utc: ''
+        winupd_log_end_utc: ''
+        winupd_event_logs: {}
+        winupd_patch_started: false
 
     - name: Erreichbarkeit pruefen
       ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/common/check-reachable.yml"
@@ -180,6 +185,16 @@
     - vars/windows-update.yml
 
   tasks:
+    - name: Patchzeit beginnen
+      ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/windows/host-time.yml"
+      when: winupd_go | bool
+
+    - name: Patchbeginn merken
+      ansible.builtin.set_fact:
+        winupd_log_start_utc: "{{ win_host_now_utc }}"
+        winupd_patch_started: true
+      when: winupd_go | bool
+
     - name: Installation
       when: winupd_go | bool
       block:
@@ -199,6 +214,50 @@
         - name: Fehler merken
           ansible.builtin.set_fact:
             winupd_error: "{{ ansible_failed_result.msg | default('unbekannter Fehler') }}"
+
+    - name: Uhrzeit fuer Patchende zuruecksetzen
+      ansible.builtin.set_fact:
+        win_host_now_utc: ''
+      when: winupd_patch_started | bool
+
+    - name: Patchzeit beenden
+      ansible.builtin.include_tasks:
+        file: "{{ playbook_dir }}/tasks/windows/host-time.yml"
+        apply:
+          ignore_errors: true
+          ignore_unreachable: true
+      when: winupd_patch_started | bool
+
+    - name: Patchende merken
+      ansible.builtin.set_fact:
+        winupd_log_end_utc: "{{ win_host_now_utc | default('') }}"
+      when: winupd_patch_started | bool
+
+    - name: Ereignisprotokolle abfragen
+      when:
+        - winupd_patch_started | bool
+        - winupd_log_end_utc | length > 0
+      block:
+        - name: Ereignisse aus Application und System sammeln
+          ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/windows/collect-event-logs.yml"
+
+      rescue:
+        - name: Fehler beim Lesen der Ereignisprotokolle merken
+          ansible.builtin.set_fact:
+            winupd_event_logs:
+              start_utc: "{{ winupd_log_start_utc }}"
+              end_utc: "{{ winupd_log_end_utc }}"
+              error: "{{ ansible_failed_result.msg | default('unbekannter Fehler') }}"
+
+    - name: Fehlendes Patchende als Fehler vermerken
+      ansible.builtin.set_fact:
+        winupd_event_logs:
+          start_utc: "{{ winupd_log_start_utc }}"
+          end_utc: ''
+          error: Ereignisprotokolle konnten nicht gelesen werden, da der Host nach dem Patch nicht erreichbar war.
+      when:
+        - winupd_patch_started | bool
+        - winupd_log_end_utc | length == 0
 
     # --- Abschluss, auch nach einem Fehler -----------------------------------
     # apply: die Schluesselwoerter muessen an die eingebundenen Tasks, an
@@ -261,6 +320,7 @@
   vars:
     # Wie in den Protokollen: Leerzeile, Strich, Leerzeile
     winupd_separator: "\n\n--------------------------------------------------------------------------\n\n"
+    event_log_results: []
 
   tasks:
     - name: Ergebnisse aller Hosts einsammeln
@@ -309,6 +369,31 @@
 
     - name: Protokoll per Mail verschicken
       ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/common/send-report-mail.yml"
+
+    - name: Ereignisprotokolle der gepatchten Hosts einsammeln
+      ansible.builtin.set_fact:
+        event_log_results: >-
+          {{ event_log_results | default([]) +
+             ([{
+                'host': item,
+                'start_utc': hostvars[item].winupd_event_logs.start_utc | default(hostvars[item].winupd_log_start_utc),
+                'end_utc': hostvars[item].winupd_event_logs.end_utc | default(hostvars[item].winupd_log_end_utc),
+                'logs': hostvars[item].winupd_event_logs | default({}),
+                'error': hostvars[item].winupd_event_logs.error | default('')
+              }] if hostvars[item].winupd_log_start_utc | default('') | length > 0 else []) }}
+      loop: "{{ report_hosts | default([]) }}"
+
+    - name: Betreff und Inhalt der Ereignis-Mail zusammenstellen
+      ansible.builtin.set_fact:
+        report_subject: "[Windows-Patchlogs] {{ event_log_results | length }} Host(s): Critical und Warning"
+        report_body: "{{ lookup('ansible.builtin.template', 'windows-event-log-report.j2') }}"
+      when: event_log_results | default([]) | length > 0
+
+    - name: Ereignisprotokolle separat per Mail verschicken
+      ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/common/send-report-mail.yml"
+      when:
+        - event_log_results | default([]) | length > 0
+        - mail_to is defined
 
     - name: Lauf scheitern lassen, wenn es Probleme gab
       ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/common/fail-on-problems.yml"

@@ -378,7 +378,8 @@ Ablauf pro Server:
 5. **Nachlauf:** suchen → installieren → neu starten, bis nichts mehr kommt
    (höchstens `winupd_max_rounds`). Manche Updates werden erst nach einem
    Neustart angeboten; sie stehen im Protokoll als `[Nachlauf <Zeit>]`.
-6. Rescan, Version und freier Platz auf C:.
+6. Ereignisse aus Application und System für den Patchzeitraum erfassen.
+7. Rescan, Version und freier Platz auf C:.
 
 Im Protokoll füllt das Playbook Snapshot, Updates, Neustart, Rescan,
 Festplattenspeicher (unter `winupd_min_free_gb` = 16 GB → FEHLER) und
@@ -389,6 +390,15 @@ am Ende als Liste. Die Vorlage liegt in `templates/windows-update-protocol.j2`.
 
 Zeiten (`Installation gestarted`, `Neustart von … bis …`) sind die Uhrzeit am
 Server, nicht die des Semaphore-Containers.
+
+Nach einem echten Patchlauf kommt eine **zweite Mail** mit den Ereignissen aus
+Application und System zwischen Patchbeginn und Patchende (UTC). Sie enthält
+nur Critical und Warning und schließt die bekannten, nicht relevanten Event-IDs
+aus. Für Testläufe, manuelle Hosts, Offline-Hosts und Hosts ohne anstehende
+Updates wird kein Ereignisblock aufgenommen; gibt es keinen gepatchten Host,
+entfällt die zweite Mail. Die Empfänger entsprechen der Protokoll-Mail
+(`mail_to`). Die sechs manuell zu ergänzenden Zeilen im Patch-Protokoll bleiben
+unverändert leer.
 
 Das Playbook besteht aus vier Plays: Vorbereitung (alle Server parallel),
 Snapshots (`serial: winupd_snapshot_parallel`), Installation (wieder parallel)
@@ -896,7 +906,8 @@ tasks/
     fail-on-problems.yml        Lauf am Ende rot, wenn es Probleme gab
   windows/
     host-info.yml               OS, Version (Release.UBR), freier Platz, Neustart aus?
-    host-time.yml               Uhrzeit am Host im Protokollformat
+    host-time.yml               Uhrzeit am Host lokal und in UTC
+    collect-event-logs.yml      Critical/Warning aus Application und System
     search-updates.yml          Updates suchen (WUA, mit Groesse)
     reboot-logged.yml           Neustart mit Beginn/Ende -> win_reboots
     update-round.yml            eine Runde suchen/installieren/neu starten
@@ -905,6 +916,7 @@ tasks/
     create-snapshot.yml         Snapshot ueber vCenter, VM per Name
 templates/
   windows-update-protocol.j2    Protokollblock eines Servers
+  windows-event-log-report.j2   separate Ereignis-Mail nach dem Patchlauf
 vars/
   windows-update.yml            Einstellungen fuer update-windows.yml
 README.md

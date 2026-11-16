@@ -138,9 +138,20 @@ Vier Plays, alle mit `vars_files: [vars/windows-update.yml]`:
        wenn nötig, erneut suchen. Höchstens `winupd_max_rounds` Runden, bis
        nichts mehr kommt. Manche Updates werden erst nach einem Neustart
        angeboten.
+   - Patchende erfassen und die Critical-/Warning-Ereignisse aus Application
+     und System sammeln.
    - Dann Rescan, `host-info` → `winupd_info_after` und das Protokoll aus
      `templates/windows-update-protocol.j2`.
-4. **Versand** (localhost): alle Protokolle in einer Mail.
+4. **Versand** (localhost): Protokolle und gegebenenfalls Ereignisse in
+   getrennten Mails.
+
+Bei einem echten Patchlauf wird zusaetzlich die Patchzeit in UTC festgehalten.
+Danach fragt das Playbook Critical- und Warning-Ereignisse aus Application und
+System fuer genau diesen Zeitraum ab, unter Ausschluss der bekannten Event-IDs,
+und verschickt sie in einer zweiten Mail an dieselben Empfaenger. Testlaeufe,
+manuelle Hosts, Offline-Hosts und Hosts ohne Updates bekommen keinen
+Ereignisblock; ohne gepatchte Hosts entfaellt die zweite Mail. Die sechs
+manuell auszufuellenden Protokollzeilen bleiben unveraendert leer.
 
 Ohne Snapshot werden keine Updates installiert. Ein Fehler landet in
 `winupd_error`; die folgenden Plays fassen den Host dann nicht mehr an, das
@@ -234,7 +245,8 @@ Jede Datei beschreibt im Kopf ihre Eingaben, Optionen und Ergebnisse.
 | `common/send-report-mail.yml` | `report_subject`, `report_body`, optional `report_attach` | Mail, sofern `mail_to` gesetzt |
 | `common/fail-on-problems.yml` | `report_hosts`, `report_results[].problem` | Lauf wird **nach** der Mail rot |
 | `windows/host-info.yml` | – | `win_host_info` {os, version `Release.UBR`, free_gb, pending_reboot, now} |
-| `windows/host-time.yml` | – | `win_host_now` |
+| `windows/host-time.yml` | – | `win_host_now` (Ortszeit), `win_host_now_utc` |
+| `windows/collect-event-logs.yml` | `winupd_log_start_utc`, `winupd_log_end_utc` | `winupd_event_logs` |
 | `windows/search-updates.yml` | `win_update_categories` | `win_update_search` {updates[{id,kb,title,size,categories}], now} |
 | `windows/reboot-logged.yml` | optional `win_reboot_timeout` (3600) | hängt {from,to} an `win_reboots` |
 | `windows/update-round.yml` | `round_idx`, `winupd_*` | eine Runde suchen, installieren, neu starten |
