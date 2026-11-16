@@ -185,6 +185,45 @@
             - not (vc_snapshot_exists | bool)
             - vc_snapshot_info.json.state != 'success'
 
+        - name: Snapshotbaum nach dem Erstellen aktualisieren
+          ansible.builtin.uri:
+            url: "{{ vc_vim }}/VirtualMachine/{{ vc_vm_moid }}/snapshot"
+            headers:
+              vmware-api-session-id: "{{ vc_vim_session }}"
+            validate_certs: "{{ vc_validate }}"
+            status_code: [200, 204]
+          register: vc_snapshots_after
+          delegate_to: localhost
+          when: not (vc_snapshot_exists | bool)
+
+        - name: Snapshot-ID merken
+          ansible.builtin.set_fact:
+            vc_snapshot_tree: >-
+              {{ (vc_snapshots_after.json.rootSnapshotList
+                  if not (vc_snapshot_exists | bool)
+                  else vc_snapshots.json.rootSnapshotList) | default([]) }}
+
+        - name: Snapshot-ID im Baum finden
+          ansible.builtin.set_fact:
+            winupd_snapshot_moid: >-
+              {%- macro find_snapshot(items) -%}
+              {%- for item in items -%}
+              {%- if item.name == snapshot_name -%}
+              {{ item.snapshot.value }}
+              {%- else -%}
+              {{ find_snapshot(item.childSnapshotList | default([])) }}
+              {%- endif -%}
+              {%- endfor -%}
+              {%- endmacro -%}
+              {{ find_snapshot(vc_snapshot_tree) | trim }}
+
+        - name: Snapshot-ID pruefen
+          ansible.builtin.assert:
+            that:
+              - winupd_snapshot_moid | length > 0
+            fail_msg: "Snapshot '{{ snapshot_name }}' wurde angelegt, aber seine ID fehlt im Snapshotbaum."
+            quiet: true
+
       always:
         - name: Abmelden (VI/JSON)
           ansible.builtin.uri:

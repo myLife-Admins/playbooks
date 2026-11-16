@@ -3,7 +3,7 @@
 # abfragen. Die bekannten, unwichtigen Event-IDs werden ausgeschlossen.
 #
 # Eingabe:  winupd_log_start_utc, winupd_log_end_utc (UTC, ISO 8601)
-# Ergebnis: winupd_event_logs mit application, system und errors
+# Ergebnis: winupd_event_logs mit Critical-/Warning-Anzahlen und errors
 
 - name: Ereignisprotokolle im Patchzeitraum abfragen
   ansible.windows.win_powershell:
@@ -24,7 +24,10 @@
           Application = @(0, 17137, 4098, 34, 904, 547, 35, 44, 194, 389, 91, 247, 1000, 1003, 1008, 16384, 16394, 56052, 56082)
           System      = @(1801, 10010, 10016, 10028, 7036, 15021)
       }
-      $results = @{ Application = @(); System = @() }
+      $results = @{
+          Application = @{ critical = 0; warning = 0 }
+          System      = @{ critical = 0; warning = 0 }
+      }
       $errors = @()
       foreach ($logName in @('Application', 'System')) {
           $xmlText = '<QueryList><Query Id="0" Path="{0}"><Select Path="{0}"></Select><Suppress Path="{0}"></Suppress></Query></QueryList>' -f $logName
@@ -35,15 +38,14 @@
           $excludeExpression = ($excluded[$logName] | ForEach-Object { "EventID=$_ " }) -join 'or '
           $suppress.InnerText = "*[System[($excludeExpression)]]"
           try {
-              $results[$logName] = @(Get-WinEvent -FilterXml $query -ErrorAction Stop | ForEach-Object {
-                  [ordered]@{
-                      time    = $_.TimeCreated.ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", $culture)
-                      level   = [string]$_.LevelDisplayName
-                      id      = [int]$_.Id
-                      source  = [string]$_.ProviderName
-                      message = [string]$_.Message
-                  }
-              })
+              $events = @(Get-WinEvent -FilterXml $query -ErrorAction Stop)
+              $critical = 0
+              $warning = 0
+              foreach ($event in $events) {
+                  if ($event.Level -eq 1) { $critical++ }
+                  elseif ($event.Level -eq 3) { $warning++ }
+              }
+              $results[$logName] = @{ critical = $critical; warning = $warning }
           }
           catch {
               if ($_.FullyQualifiedErrorId -notmatch 'NoMatchingEventsFound') {
@@ -54,8 +56,8 @@
       $Ansible.Result = @{
           start_utc  = $startIso
           end_utc    = $endIso
-          application = @($results.Application)
-          system      = @($results.System)
+          application = $results.Application
+          system      = $results.System
           errors      = @($errors)
       }
   register: winupd_event_logs_raw

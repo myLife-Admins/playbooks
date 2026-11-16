@@ -379,7 +379,8 @@ Ablauf pro Server:
    (höchstens `winupd_max_rounds`). Manche Updates werden erst nach einem
    Neustart angeboten; sie stehen im Protokoll als `[Nachlauf <Zeit>]`.
 6. Ereignisse aus Application und System für den Patchzeitraum erfassen.
-7. Rescan, Version und freier Platz auf C:.
+7. Rescan, Version und freier Platz auf C:; danach die Snapshot-Löschung
+   im vCenter für die konfigurierten Aufbewahrungsstunden vormerken.
 
 Im Protokoll füllt das Playbook Snapshot, Updates, Neustart, Rescan,
 Festplattenspeicher (unter `winupd_min_free_gb` = 16 GB → FEHLER) und
@@ -391,14 +392,27 @@ am Ende als Liste. Die Vorlage liegt in `templates/windows-update-protocol.j2`.
 Zeiten (`Installation gestarted`, `Neustart von … bis …`) sind die Uhrzeit am
 Server, nicht die des Semaphore-Containers.
 
-Nach einem echten Patchlauf kommt eine **zweite Mail** mit den Ereignissen aus
-Application und System zwischen Patchbeginn und Patchende (UTC). Sie enthält
-nur Critical und Warning und schließt die bekannten, nicht relevanten Event-IDs
-aus. Für Testläufe, manuelle Hosts, Offline-Hosts und Hosts ohne anstehende
-Updates wird kein Ereignisblock aufgenommen; gibt es keinen gepatchten Host,
-entfällt die zweite Mail. Die Empfänger entsprechen der Protokoll-Mail
-(`mail_to`). Die sechs manuell zu ergänzenden Zeilen im Patch-Protokoll bleiben
-unverändert leer.
+Nach einem echten Patchlauf kommt eine **zweite Mail** mit einer kompakten
+Übersicht der Critical- und Warning-Anzahlen aus Application und System im
+Patchzeitraum (UTC); bekannte, nicht relevante Event-IDs werden ausgeschlossen.
+Bei Treffern weist die Mail darauf hin, die Details direkt im Ereignisprotokoll
+des Hosts zu prüfen. Für Testläufe, manuelle Hosts, Offline-Hosts und Hosts
+ohne anstehende Updates wird kein Ereignisblock aufgenommen; gibt es keinen
+gepatchten Host, entfällt die zweite Mail. Die Empfänger entsprechen der
+Protokoll-Mail (`mail_to`). Die sechs manuell zu ergänzenden Zeilen im
+Patch-Protokoll bleiben unverändert leer.
+
+Nach einem erfolgreichen Patchlauf plant das Playbook im vCenter die Löschung
+des verwendeten Snapshots als einmalige Aufgabe. Standardmäßig wird er 24
+Stunden nach Laufende gelöscht. Die Frist lässt sich über die Extra-Var oder
+Survey-Variable `winupd_snapshot_retention_hours` anpassen; `0` deaktiviert die
+automatische Löschung. Bei fehlgeschlagenen Updates oder ausstehendem manuellem
+Neustart bleibt der Snapshot erhalten. Dafür braucht das vCenter-Konto die
+Rechte `System.View`, `ScheduledTask.Create`, `ScheduledTask.Edit`,
+`ScheduledTask.Delete` und `VirtualMachine.State.RemoveSnapshot`. Eine schon
+geplante Löschung wird direkt nach dem Ermitteln des Snapshots und vor den
+Patchschritten aufgehoben; scheitert das, wird der Patch blockiert. Scheitert
+der Patch danach, bleibt der Snapshot ohne automatische Löschung erhalten.
 
 Das Playbook besteht aus vier Plays: Vorbereitung (alle Server parallel),
 Snapshots (`serial: winupd_snapshot_parallel`), Installation (wieder parallel)
@@ -417,6 +431,7 @@ haben `vars_files` Vorrang:
 |---|---|---|
 | `winupd_dry_run` | `true` | Testlauf, nur suchen und listen |
 | `winupd_snapshot_parallel` | `2` | höchstens so viele Snapshots gleichzeitig |
+| `winupd_snapshot_retention_hours` | `24` | Aufbewahrung nach erfolgreichem Patch; `0` deaktiviert |
 | `winupd_min_free_gb` | `16` | darunter FEHLER bei Festplattenspeicher |
 | `winupd_max_rounds` | `4` | Nachlauf-Runden nach Runde 0 |
 | `winupd_first` | Servicing Stack | Updates, die vor allen anderen kommen |
@@ -428,7 +443,7 @@ Variablen pro Host oder Gruppe im Inventory:
 | `winupd_manual=true` | wird von Hand gepatcht, nur Leerblock |
 | `winupd_reboot=false` | kein automatischer Neustart, Protokoll: „manueller Neustart noetig" |
 | `vm_name=<Name>` | VM-Name im vCenter, falls weder Kurzname noch FQDN |
-| `snapshot_required=false` | Host ohne VM (physisch) |
+| `snapshot_required=false` | Host ohne Snapshot überspringen und als Problem melden; kein Patch ohne Snapshot |
 
 vCenter-Zugang wie im alten `update-windows-server.yml` als Variablengruppe:
 `vm_user`, `vm_password` (Secret), optional `vcenter_hostname`
@@ -440,7 +455,10 @@ per VI/JSON-API (`/sdk/vim25`, ab vCenter 8.0 Update 1). Bewusst nicht über
 im Semaphore-Image fehlt — und nachinstalliert wäre sie beim nächsten
 Image-Update wieder weg. Gibt es den Snapshot mit dem Namen schon (zweiter
 Lauf am selben Tag), wird kein zweiter angelegt. `vcenter_hostname` muss als
-FQDN unter `NO_PROXY` fallen.
+FQDN unter `NO_PROXY` fallen. Die verzögerte Löschung wird nach erfolgreichem
+Patchlauf über den vSphere `ScheduledTaskManager` als einmalige Aufgabe
+eingetragen. Eine vorherige automatische Löschung wird vor dem Patch aufgehoben
+und nach Erfolg neu terminiert.
 
 Noch nicht drin, was das alte Playbook konnte: Dienste vor dem Patchen stoppen
 und danach starten (`windows_patch_services`) und das Schreiben direkt auf den
@@ -826,8 +844,9 @@ Findet der Lauf die VM nicht in vCenter, bricht er für diesen Host ab.
 Vorher wurde in dem Fall **ohne Rollback-Punkt weitergepatcht**, und das
 Protokoll erwähnte es mit keinem Wort.
 
-Für Hosts ohne VM in diesem vCenter (physische Maschinen, Fremd-vCenter) pro
-Gruppe `snapshot_required: false` setzen, z.B. in
+Hosts ohne VM in diesem vCenter (physische Maschinen, Fremd-vCenter) werden mit
+`snapshot_required: false` übersprungen und als Problem gemeldet; ohne Snapshot
+wird nicht gepatcht. Die Variable pro Gruppe setzen, z.B. in
 `inventory/group_vars/windows_notdomain.yml`.
 
 Der Resume-Marker wird außerdem erst geschrieben, wenn der Snapshot wirklich
@@ -914,6 +933,7 @@ tasks/
     user-installs.yml           Programme mit Scope user aus allen Profilen
   vmware/
     create-snapshot.yml         Snapshot ueber vCenter, VM per Name
+    schedule-snapshot-cleanup.yml Loeschung im vCenter vormerken/aufheben
 templates/
   windows-update-protocol.j2    Protokollblock eines Servers
   windows-event-log-report.j2   separate Ereignis-Mail nach dem Patchlauf

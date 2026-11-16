@@ -36,6 +36,7 @@
 # vars/windows-update.yml):
 #   winupd_dry_run            Testlauf, Standard true
 #   winupd_snapshot_parallel  hoechstens so viele Snapshots gleichzeitig, Standard 2
+#   winupd_snapshot_retention_hours  Loeschfrist nach erfolgreichem Patch, Standard 24; 0 = aus
 #
 # vCenter - Namen wie im alten update-windows-server.yml (Variablengruppe in
 # Semaphore, Passwort als Secret):
@@ -85,10 +86,20 @@
         winupd_log_end_utc: ''
         winupd_event_logs: {}
         winupd_patch_started: false
+        winupd_snapshot_moid: ''
+        winupd_snapshot_cleanup_run_at_utc: ''
+        winupd_snapshot_cleanup_error: ''
 
     - name: Erreichbarkeit pruefen
       ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/common/check-reachable.yml"
       when: not (winupd_manual | default(false) | bool)
+
+    - name: Snapshot-Aufbewahrungszeit pruefen
+      ansible.builtin.assert:
+        that:
+          - (winupd_snapshot_retention_hours | string) is match('^[0-9]+$')
+        fail_msg: winupd_snapshot_retention_hours muss eine ganze Zahl ab 0 sein.
+        quiet: true
 
     - name: Stand und Updates
       when: not (winupd_skip | bool)
@@ -131,6 +142,7 @@
     - name: Snapshot nicht vorgesehen
       ansible.builtin.set_fact:
         winupd_snapshot: uebersprungen (snapshot_required=false)
+        winupd_error: snapshot_required=false - ohne Snapshot wird nicht gepatcht
       when:
         - winupd_go | bool
         - not (snapshot_required | default(true) | bool)
@@ -167,6 +179,12 @@
           vars:
             snapshot_name: "{{ winupd_snapshot_name }}"
             snapshot_description: Vor Windows-Updates (Semaphore)
+
+        - name: Vorherige Snapshot-Loeschung vor dem Patch aufheben
+          ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/vmware/schedule-snapshot-cleanup.yml"
+          vars:
+            snapshot_name: "{{ winupd_snapshot_name }}"
+            cancel_only: true
 
         - name: Snapshot merken
           ansible.builtin.set_fact:
@@ -298,13 +316,67 @@
         - not (winupd_skip | bool)
         - winupd_is_windows | bool
 
+    - name: Snapshot-Loeschung nach erfolgreichem Patch planen
+      when:
+        - winupd_patch_started | bool
+        - winupd_snapshot == 'OK'
+        - winupd_snapshot_moid | length > 0
+        - winupd_snapshot_retention_hours | int > 0
+        - winupd_error | length == 0
+        - (winupd_failed | map(attribute='id') | list
+           | difference(winupd_installed | map(attribute='id') | list) | length) == 0
+        - not (winupd_reboot_manual | bool)
+        - not (winupd_info_after.pending_reboot | default(true) | bool)
+      block:
+        - name: Snapshot-Loeschung im vCenter einrichten
+          ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/vmware/schedule-snapshot-cleanup.yml"
+          vars:
+            snapshot_name: "{{ winupd_snapshot_name }}"
+
+      rescue:
+        - name: Fehler bei der Snapshot-Loeschung merken
+          ansible.builtin.set_fact:
+            winupd_snapshot_cleanup_error: "{{ ansible_failed_result.msg | default('unbekannter Fehler') }}"
+
+    - name: Snapshot bei nicht erfolgreichem Patch behalten
+      ansible.builtin.debug:
+        msg: >-
+          Snapshot '{{ winupd_snapshot_name }}' bleibt erhalten, da der Patch
+          fehlgeschlagen ist oder noch ein manueller Neustart aussteht.
+      when:
+        - winupd_patch_started | bool
+        - winupd_snapshot == 'OK'
+        - winupd_snapshot_retention_hours | int > 0
+        - (winupd_error | length > 0) or
+          ((winupd_failed | map(attribute='id') | list
+            | difference(winupd_installed | map(attribute='id') | list) | length) > 0) or
+          (winupd_reboot_manual | bool) or
+          (winupd_info_after.pending_reboot | default(true) | bool)
+
+    - name: Snapshot-Loeschfehler anzeigen
+      ansible.builtin.debug:
+        msg: >-
+          Automatische Snapshot-Loeschung konnte nicht eingerichtet werden:
+          {{ winupd_snapshot_cleanup_error }}
+      when: winupd_snapshot_cleanup_error | length > 0
+
+    - name: Deaktivierte automatische Snapshot-Loeschung anzeigen
+      ansible.builtin.debug:
+        msg: "Automatische Loeschung deaktiviert; Snapshot '{{ winupd_snapshot_name }}' bleibt erhalten."
+      when:
+        - winupd_patch_started | bool
+        - winupd_snapshot == 'OK'
+        - winupd_snapshot_retention_hours | int == 0
+
     - name: Protokoll schreiben
       ansible.builtin.set_fact:
         winupd_protocol: "{{ lookup('ansible.builtin.template', 'windows-update-protocol.j2') }}"
         winupd_problem: >-
-          {{ winupd_error if winupd_error | length > 0
-             else ((winupd_failed | map(attribute='id') | unique | list | length) ~ ' Update(s) fehlgeschlagen'
-                   if winupd_failed | length > 0 else '') }}
+          {{ (winupd_error if winupd_error | length > 0
+              else ((winupd_failed | map(attribute='id') | unique | list | length) ~ ' Update(s) fehlgeschlagen'
+                    if winupd_failed | length > 0 else ''))
+             ~ (('; automatische Snapshot-Loeschung fehlgeschlagen: ' ~ winupd_snapshot_cleanup_error)
+                if winupd_snapshot_cleanup_error | length > 0 else '') }}
 
     - name: Protokoll
       ansible.builtin.debug:

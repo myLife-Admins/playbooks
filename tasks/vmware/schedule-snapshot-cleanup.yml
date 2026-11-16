@@ -1,0 +1,203 @@
+---
+# Plant die einmalige Snapshot-Loeschung im vCenter oder hebt sie vor einem
+# neuen Patchlauf auf.
+#
+# Eingabe:  winupd_snapshot_moid, snapshot_name,
+#           winupd_snapshot_retention_hours
+#           vm_user, vm_password
+# Optional: vcenter_hostname, vcenter_validate_certs,
+#           vcenter_vijson_release, cancel_only (Standard false)
+# Ergebnis: bei Planung winupd_snapshot_cleanup_run_at_utc;
+#           bei cancel_only wird eine bestehende Aufgabe entfernt
+#
+# Der vCenter-Task bleibt dort bestehen, auch wenn Semaphore den Lauf beendet.
+
+- name: Loeschzeitpunkt im vCenter berechnen
+  ansible.windows.win_powershell:
+    parameters:
+      RetentionHours: "{{ winupd_snapshot_retention_hours | int }}"
+    script: |
+      param ([int]$RetentionHours)
+      $ErrorActionPreference = 'Stop'
+      $Ansible.Changed = $false
+      $runAt = [DateTimeOffset]::UtcNow.AddHours($RetentionHours)
+      $Ansible.Result = @{
+          run_at = $runAt.ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", [Globalization.CultureInfo]::InvariantCulture)
+      }
+  register: winupd_snapshot_cleanup_time
+  when: not (cancel_only | default(false) | bool)
+
+- name: Bereinigungsaufgabe benennen
+  ansible.builtin.set_fact:
+    vc_cleanup_task_name: "WSU_cleanup_{{ winupd_snapshot_moid }}"
+    vc_validate: "{{ vcenter_validate_certs | default(false) | bool }}"
+    vc_vim: >-
+      https://{{ vcenter_hostname | default('vcenter1.gutingia.local') }}/sdk/vim25/{{ vcenter_vijson_release | default('8.0.1.0') }}
+
+- name: Loeschzeitpunkt merken
+  ansible.builtin.set_fact:
+    winupd_snapshot_cleanup_run_at_utc: "{{ winupd_snapshot_cleanup_time.result.run_at }}"
+  when: not (cancel_only | default(false) | bool)
+
+- name: vCenter-Anmeldung fuer die Snapshot-Loeschung
+  ansible.builtin.uri:
+    url: "{{ vc_vim }}/SessionManager/SessionManager/Login"
+    method: POST
+    body_format: json
+    body:
+      userName: "{{ vm_user }}"
+      password: "{{ vm_password }}"
+    validate_certs: "{{ vc_validate }}"
+  register: vc_cleanup_login
+  delegate_to: localhost
+  no_log: true
+
+- name: Sitzung fuer Snapshot-Loeschung merken
+  ansible.builtin.set_fact:
+    vc_cleanup_session: "{{ vc_cleanup_login.vmware_api_session_id }}"
+  no_log: true
+
+- name: Snapshot-Loeschaufgabe im vCenter verwalten
+  block:
+    - name: vCenter-Inhalt abfragen
+      ansible.builtin.uri:
+        url: "{{ vc_vim }}/ServiceInstance/ServiceInstance/content"
+        headers:
+          vmware-api-session-id: "{{ vc_cleanup_session }}"
+        validate_certs: "{{ vc_validate }}"
+      register: vc_cleanup_service_content
+      delegate_to: localhost
+
+    - name: Bereinigungsaufgabe vorbereiten
+      ansible.builtin.set_fact:
+        vc_cleanup_task_spec:
+          _typeName: ScheduledTaskSpec
+          name: "{{ vc_cleanup_task_name }}"
+          description: "Windows-Patchsnapshot {{ snapshot_name }} automatisch loeschen"
+          enabled: true
+          scheduler:
+            _typeName: OnceTaskScheduler
+            runAt: "{{ winupd_snapshot_cleanup_run_at_utc }}"
+          action:
+            _typeName: MethodAction
+            name: RemoveSnapshot_Task
+            argument:
+              - _typeName: MethodActionArgument
+                value: false
+              - _typeName: MethodActionArgument
+                value: true
+      when: not (cancel_only | default(false) | bool)
+
+    - name: Vorhandene Bereinigungsaufgaben fuer den Snapshot abfragen
+      ansible.builtin.uri:
+        url: >-
+          {{ vc_vim }}/ScheduledTaskManager/{{ vc_cleanup_service_content.json.scheduledTaskManager.value }}/RetrieveObjectScheduledTask
+        method: POST
+        body_format: json
+        body:
+          obj:
+            _typeName: ManagedObjectReference
+            type: VirtualMachineSnapshot
+            value: "{{ winupd_snapshot_moid }}"
+        headers:
+          vmware-api-session-id: "{{ vc_cleanup_session }}"
+        validate_certs: "{{ vc_validate }}"
+      register: vc_cleanup_task_refs
+      delegate_to: localhost
+
+    - name: Vorhandene Bereinigungsaufgaben lesen
+      ansible.builtin.uri:
+        url: "{{ vc_vim }}/ScheduledTask/{{ cleanup_task_ref.value }}/info"
+        headers:
+          vmware-api-session-id: "{{ vc_cleanup_session }}"
+        validate_certs: "{{ vc_validate }}"
+      loop: "{{ vc_cleanup_task_refs.json | default([], true) }}"
+      loop_control:
+        loop_var: cleanup_task_ref
+        label: "{{ cleanup_task_ref.value }}"
+      register: vc_cleanup_task_infos
+      delegate_to: localhost
+
+    - name: Vorhandene Aufgabe fuer diesen Snapshot finden
+      ansible.builtin.set_fact:
+        vc_cleanup_task_moid: >-
+          {{ (vc_cleanup_task_infos.results | default([])
+              | selectattr('json.name', 'equalto', vc_cleanup_task_name)
+              | map(attribute='item.value') | list + [''])[0] }}
+
+    - name: Bestehende Bereinigungsaufgabe entfernen
+      ansible.builtin.uri:
+        url: "{{ vc_vim }}/ScheduledTask/{{ vc_cleanup_task_moid }}/RemoveScheduledTask"
+        method: POST
+        headers:
+          vmware-api-session-id: "{{ vc_cleanup_session }}"
+        validate_certs: "{{ vc_validate }}"
+        status_code: [204]
+      delegate_to: localhost
+      when:
+        - cancel_only | default(false) | bool
+        - vc_cleanup_task_moid | length > 0
+
+    - name: Bestehende Bereinigungsaufgabe neu planen
+      ansible.builtin.uri:
+        url: "{{ vc_vim }}/ScheduledTask/{{ vc_cleanup_task_moid }}/ReconfigureScheduledTask"
+        method: POST
+        body_format: json
+        body:
+          spec: "{{ vc_cleanup_task_spec }}"
+        headers:
+          vmware-api-session-id: "{{ vc_cleanup_session }}"
+        validate_certs: "{{ vc_validate }}"
+        status_code: [200, 204]
+      delegate_to: localhost
+      when:
+        - not (cancel_only | default(false) | bool)
+        - vc_cleanup_task_moid | length > 0
+
+    - name: Neue Bereinigungsaufgabe anlegen
+      ansible.builtin.uri:
+        url: >-
+          {{ vc_vim }}/ScheduledTaskManager/{{ vc_cleanup_service_content.json.scheduledTaskManager.value }}/CreateObjectScheduledTask
+        method: POST
+        body_format: json
+        body:
+          obj:
+            _typeName: ManagedObjectReference
+            type: VirtualMachineSnapshot
+            value: "{{ winupd_snapshot_moid }}"
+          spec: "{{ vc_cleanup_task_spec }}"
+        headers:
+          vmware-api-session-id: "{{ vc_cleanup_session }}"
+        validate_certs: "{{ vc_validate }}"
+        status_code: [200]
+      register: vc_cleanup_task_created
+      delegate_to: localhost
+      when:
+        - not (cancel_only | default(false) | bool)
+        - vc_cleanup_task_moid | length == 0
+
+    - name: Geplante Snapshot-Loeschung anzeigen
+      ansible.builtin.debug:
+        msg: >-
+          Snapshot '{{ snapshot_name }}' wird am
+          {{ winupd_snapshot_cleanup_run_at_utc }} UTC automatisch geloescht.
+      when: not (cancel_only | default(false) | bool)
+
+    - name: Aufgehobene Snapshot-Loeschung anzeigen
+      ansible.builtin.debug:
+        msg: "Vorhandene automatische Loeschung fuer Snapshot '{{ snapshot_name }}' aufgehoben."
+      when:
+        - cancel_only | default(false) | bool
+        - vc_cleanup_task_moid | length > 0
+
+  always:
+    - name: vCenter-Sitzung schliessen
+      ansible.builtin.uri:
+        url: "{{ vc_vim }}/SessionManager/SessionManager/Logout"
+        method: POST
+        headers:
+          vmware-api-session-id: "{{ vc_cleanup_session }}"
+        validate_certs: "{{ vc_validate }}"
+        status_code: [200, 204]
+      delegate_to: localhost
+      failed_when: false

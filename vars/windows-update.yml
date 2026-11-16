@@ -14,6 +14,10 @@ winupd_dry_run: true
 # ergibt es keinen Sinn.
 winupd_snapshot_parallel: 2
 
+# Snapshot nach erfolgreichem Patchlauf nach so vielen Stunden loeschen.
+# 0 deaktiviert die automatische Loeschung. Per Extra-Var oder Survey anpassbar.
+winupd_snapshot_retention_hours: 24
+
 # Unter so viel freiem Platz auf C: steht im Protokoll FEHLER
 winupd_min_free_gb: 16
 

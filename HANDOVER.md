@@ -142,16 +142,29 @@ Vier Plays, alle mit `vars_files: [vars/windows-update.yml]`:
      und System sammeln.
    - Dann Rescan, `host-info` → `winupd_info_after` und das Protokoll aus
      `templates/windows-update-protocol.j2`.
+   - Nach erfolgreichem Patch die Snapshot-Loeschung im vCenter vormerken.
 4. **Versand** (localhost): Protokolle und gegebenenfalls Ereignisse in
    getrennten Mails.
 
 Bei einem echten Patchlauf wird zusaetzlich die Patchzeit in UTC festgehalten.
-Danach fragt das Playbook Critical- und Warning-Ereignisse aus Application und
-System fuer genau diesen Zeitraum ab, unter Ausschluss der bekannten Event-IDs,
-und verschickt sie in einer zweiten Mail an dieselben Empfaenger. Testlaeufe,
-manuelle Hosts, Offline-Hosts und Hosts ohne Updates bekommen keinen
-Ereignisblock; ohne gepatchte Hosts entfaellt die zweite Mail. Die sechs
+Danach zaehlt das Playbook Critical- und Warning-Ereignisse aus Application und
+System fuer genau diesen Zeitraum, unter Ausschluss der bekannten Event-IDs,
+und verschickt eine kompakte Uebersicht in einer zweiten Mail. Bei Treffern
+weist sie auf eine genauere Pruefung im Ereignisprotokoll des Hosts hin.
+Testlaeufe, manuelle Hosts, Offline-Hosts und Hosts ohne Updates bekommen
+keinen Ereignisblock; ohne gepatchte Hosts entfaellt die zweite Mail. Die sechs
 manuell auszufuellenden Protokollzeilen bleiben unveraendert leer.
+
+Nach erfolgreichem Patch wird die Loeschung des konkreten Snapshots als
+einmalige vCenter-Aufgabe geplant. `winupd_snapshot_retention_hours` ist per
+Extra-Var/Survey ueberschreibbar (Standard 24, `0` deaktiviert die Loeschung).
+Bei Updatefehlern oder ausstehendem manuellem Neustart bleibt der Snapshot
+erhalten. Das vCenter-Konto benoetigt `ScheduledTask.Create`,
+`ScheduledTask.Edit`, `ScheduledTask.Delete`, `System.View` und
+`VirtualMachine.State.RemoveSnapshot`. Eine bereits geplante Loeschung wird
+direkt nach dem Ermitteln des Snapshots und vor den Patchschritten aufgehoben;
+scheitert das, wird der Patch blockiert. Bei Patchfehlern bleibt der Snapshot
+ohne automatische Loeschung erhalten.
 
 Ohne Snapshot werden keine Updates installiert. Ein Fehler landet in
 `winupd_error`; die folgenden Plays fassen den Host dann nicht mehr an, das
@@ -162,7 +175,8 @@ Pro Host im Inventory:
 - `winupd_reboot=false`: kein Neustart, im Protokoll steht „manueller Neustart
   noetig“.
 - `vm_name=…`: wenn die VM im vCenter anders heißt als der Host.
-- `snapshot_required=false`: physischer Host ohne VM.
+- `snapshot_required=false`: Host ohne Snapshot ueberspringen und als Problem
+  melden; ohne Snapshot wird nicht gepatcht.
 
 #### Protokollformat
 Das Format entspricht den bisherigen Patch-Protokollen auf `\\fs5`; Vorlage
@@ -252,6 +266,7 @@ Jede Datei beschreibt im Kopf ihre Eingaben, Optionen und Ergebnisse.
 | `windows/update-round.yml` | `round_idx`, `winupd_*` | eine Runde suchen, installieren, neu starten |
 | `windows/user-installs.yml` | optional `user_install_ignore` | `win_user_installs` {installs, profiles, errors, bundles} |
 | `vmware/create-snapshot.yml` | `snapshot_name`, `snapshot_description`, `vm_user`, `vm_password` | Snapshot oder Abbruch |
+| `vmware/schedule-snapshot-cleanup.yml` | Snapshot-MOIDs, `snapshot_name`, `winupd_snapshot_retention_hours`, vCenter-Zugang | einmalige automatische Loeschung nach erfolgreichem Patch |
 
 ### vCenter-Snapshot ohne pyvmomi
 Alles läuft über `ansible.builtin.uri` mit `delegate_to: localhost`:
@@ -279,7 +294,7 @@ Das ist die häufigste Fehlerquelle, deshalb hier ausführlich.
 | Art | Wo | Beispiele |
 |---|---|---|
 | Pro Host/Gruppe | **Inventory** (Semaphore) | `winupd_manual`, `winupd_reboot`, `vm_name`, `snapshot_required`, `winget_pin_ids`, `user_install_ignore`, `ansible_connection=winrm` |
-| Pro Lauf | **Survey** des Templates (Typ Enum `true`/`false`) | `winget_dry_run`, `apt_dry_run`, `winupd_dry_run`, `target_hosts`, `winupd_snapshot_parallel` |
+| Pro Lauf | **Survey** des Templates (Bool-Schalter als Enum, Aufbewahrung als Integer) | `winget_dry_run`, `apt_dry_run`, `winupd_dry_run`, `target_hosts`, `winupd_snapshot_parallel`, `winupd_snapshot_retention_hours` |
 | Zugangsdaten / Mail / vCenter | **Variablengruppe** (Environment), Passwörter als **Secret** | `mail_host`, `mail_to`, `mail_from`, `mail_cc`, `mail_bcc`, `mail_port`, `mail_secure`, `mail_username`, `mail_password`, `vm_user`, `vm_password`, `vcenter_hostname`, `vcenter_validate_certs` |
 | Feste Einstellungen eines Playbooks | `vars/<playbook>.yml` per `vars_files` | `winupd_min_free_gb`, `winupd_first`, `win_update_categories` |
 
