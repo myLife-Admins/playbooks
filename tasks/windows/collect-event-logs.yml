@@ -1,9 +1,9 @@
 ---
-# Kritische und Warnungsereignisse aus Application und System im Patchzeitraum
-# abfragen. Die bekannten, unwichtigen Event-IDs werden ausgeschlossen.
+# Kritische Ereignisse, Fehler und Warnungen aus Application und System im
+# Patchzeitraum abfragen. Die bekannten, unwichtigen Event-IDs werden ausgeschlossen.
 #
 # Eingabe:  winupd_log_start_utc, winupd_log_end_utc (UTC, ISO 8601)
-# Ergebnis: winupd_event_logs mit Critical-/Warning-Anzahlen und errors
+# Ergebnis: winupd_event_logs mit Anzahlen und Meldungen nach Schweregrad
 
 - name: Ereignisprotokolle im Patchzeitraum abfragen
   ansible.windows.win_powershell:
@@ -25,8 +25,8 @@
           System      = @(1801, 10010, 10016, 10028, 7036, 15021)
       }
       $results = @{
-          Application = @{ critical = 0; warning = 0 }
-          System      = @{ critical = 0; warning = 0 }
+          Application = @{ critical = 0; warning = 0; error = 0; events = @() }
+          System      = @{ critical = 0; warning = 0; error = 0; events = @() }
       }
       $errors = @()
       foreach ($logName in @('Application', 'System')) {
@@ -34,18 +34,27 @@
           [xml]$query = $xmlText
           $select = $query.SelectSingleNode('/QueryList/Query/Select')
           $suppress = $query.SelectSingleNode('/QueryList/Query/Suppress')
-          $select.InnerText = "*[System[TimeCreated[@SystemTime>='$startIso' and @SystemTime<='$endIso'] and (Level=1 or Level=3)]]"
+          $select.InnerText = "*[System[TimeCreated[@SystemTime>='$startIso' and @SystemTime<='$endIso'] and (Level=1 or Level=2 or Level=3)]]"
           $excludeExpression = ($excluded[$logName] | ForEach-Object { "EventID=$_ " }) -join 'or '
           $suppress.InnerText = "*[System[($excludeExpression)]]"
           try {
               $events = @(Get-WinEvent -FilterXml $query -ErrorAction Stop)
-              $critical = 0
-              $warning = 0
-              foreach ($event in $events) {
-                  if ($event.Level -eq 1) { $critical++ }
-                  elseif ($event.Level -eq 3) { $warning++ }
+              foreach ($event in ($events | Sort-Object TimeCreated)) {
+                  $severity = switch ($event.Level) {
+                      1 { 'critical' }
+                      2 { 'error' }
+                      3 { 'warning' }
+                  }
+                  if ($severity) {
+                      $results[$logName][$severity]++
+                      $message = ([string]$event.Message -replace '\s+', ' ').Trim()
+                      $results[$logName].events += @{
+                          level    = $severity.ToUpperInvariant()
+                          provider = [string]$event.ProviderName
+                          message  = $message
+                      }
+                  }
               }
-              $results[$logName] = @{ critical = $critical; warning = $warning }
           }
           catch {
               if ($_.FullyQualifiedErrorId -notmatch 'NoMatchingEventsFound') {

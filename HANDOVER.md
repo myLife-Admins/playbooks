@@ -138,8 +138,8 @@ Vier Plays, alle mit `vars_files: [vars/windows-update.yml]`:
        wenn nötig, erneut suchen. Höchstens `winupd_max_rounds` Runden, bis
        nichts mehr kommt. Manche Updates werden erst nach einem Neustart
        angeboten.
-   - Patchende erfassen und die Critical-/Warning-Ereignisse aus Application
-     und System sammeln.
+   - Patchende erfassen und Critical-/Warning-/Error-Ereignisse aus
+     Application und System mit Meldung sammeln.
    - Dann Rescan, `host-info` → `winupd_info_after` und das Protokoll aus
      `templates/windows-update-protocol.j2`.
    - Nach erfolgreichem Patch die Snapshot-Loeschung im vCenter vormerken.
@@ -147,10 +147,10 @@ Vier Plays, alle mit `vars_files: [vars/windows-update.yml]`:
    getrennten Mails.
 
 Bei einem echten Patchlauf wird zusaetzlich die Patchzeit in UTC festgehalten.
-Danach zaehlt das Playbook Critical- und Warning-Ereignisse aus Application und
-System fuer genau diesen Zeitraum, unter Ausschluss der bekannten Event-IDs,
-und verschickt eine kompakte Uebersicht in einer zweiten Mail. Bei Treffern
-weist sie auf eine genauere Pruefung im Ereignisprotokoll des Hosts hin.
+Danach zaehlt das Playbook Critical-, Warning- und Error-Ereignisse aus
+Application und System fuer genau diesen Zeitraum, unter Ausschluss der
+bekannten Event-IDs, und verschickt Zaehler sowie Ereignismeldungen in einer
+zweiten Mail.
 Testlaeufe, manuelle Hosts, Offline-Hosts und Hosts ohne Updates bekommen
 keinen Ereignisblock; ohne gepatchte Hosts entfaellt die zweite Mail. Die sechs
 manuell auszufuellenden Protokollzeilen bleiben unveraendert leer.
@@ -260,7 +260,7 @@ Jede Datei beschreibt im Kopf ihre Eingaben, Optionen und Ergebnisse.
 | `common/fail-on-problems.yml` | `report_hosts`, `report_results[].problem` | Lauf wird **nach** der Mail rot |
 | `windows/host-info.yml` | – | `win_host_info` {os, version `Release.UBR`, free_gb, pending_reboot, now} |
 | `windows/host-time.yml` | – | `win_host_now` (Ortszeit), `win_host_now_utc` |
-| `windows/collect-event-logs.yml` | `winupd_log_start_utc`, `winupd_log_end_utc` | `winupd_event_logs` |
+| `windows/collect-event-logs.yml` | `winupd_log_start_utc`, `winupd_log_end_utc` | Critical/Warning/Error-Zaehler und Ereignismeldungen |
 | `windows/search-updates.yml` | `win_update_categories` | `win_update_search` {updates[{id,kb,title,size,categories}], now} |
 | `windows/reboot-logged.yml` | optional `win_reboot_timeout` (3600) | hängt {from,to} an `win_reboots` |
 | `windows/update-round.yml` | `round_idx`, `winupd_*` | eine Runde suchen, installieren, neu starten |

@@ -392,14 +392,14 @@ am Ende als Liste. Die Vorlage liegt in `templates/windows-update-protocol.j2`.
 Zeiten (`Installation gestarted`, `Neustart von … bis …`) sind die Uhrzeit am
 Server, nicht die des Semaphore-Containers.
 
-Nach einem echten Patchlauf kommt eine **zweite Mail** mit einer kompakten
-Übersicht der Critical- und Warning-Anzahlen aus Application und System im
-Patchzeitraum (UTC); bekannte, nicht relevante Event-IDs werden ausgeschlossen.
-Bei Treffern weist die Mail darauf hin, die Details direkt im Ereignisprotokoll
-des Hosts zu prüfen. Für Testläufe, manuelle Hosts, Offline-Hosts und Hosts
-ohne anstehende Updates wird kein Ereignisblock aufgenommen; gibt es keinen
-gepatchten Host, entfällt die zweite Mail. Die Empfänger entsprechen der
-Protokoll-Mail (`mail_to`). Die sechs manuell zu ergänzenden Zeilen im
+Nach einem echten Patchlauf kommt eine **zweite Mail** mit den Critical-,
+Warning- und Error-Anzahlen aus Application und System im Patchzeitraum (UTC);
+bekannte, nicht relevante Event-IDs werden ausgeschlossen. Unter den Anzahlen
+stehen die Ereignismeldungen als `[SEVERITY] Provider: Meldung`, damit wichtige
+Details direkt auffallen. Für Testläufe, manuelle Hosts, Offline-Hosts und
+Hosts ohne anstehende Updates wird kein Ereignisblock aufgenommen; gibt es
+keinen gepatchten Host, entfällt die zweite Mail. Die Empfänger entsprechen
+der Protokoll-Mail (`mail_to`). Die sechs manuell zu ergänzenden Zeilen im
 Patch-Protokoll bleiben unverändert leer.
 
 Nach einem erfolgreichen Patchlauf plant das Playbook im vCenter die Löschung
@@ -926,7 +926,7 @@ tasks/
   windows/
     host-info.yml               OS, Version (Release.UBR), freier Platz, Neustart aus?
     host-time.yml               Uhrzeit am Host lokal und in UTC
-    collect-event-logs.yml      Critical/Warning aus Application und System
+    collect-event-logs.yml      Critical/Warning/Error und Meldungen erfassen
     search-updates.yml          Updates suchen (WUA, mit Groesse)
     reboot-logged.yml           Neustart mit Beginn/Ende -> win_reboots
     update-round.yml            eine Runde suchen/installieren/neu starten

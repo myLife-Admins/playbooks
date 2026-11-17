@@ -457,7 +457,7 @@
 
     - name: Betreff und Inhalt der Ereignis-Mail zusammenstellen
       ansible.builtin.set_fact:
-        report_subject: "[Windows-Patchlogs] {{ event_log_results | length }} Host(s): Critical und Warning"
+        report_subject: "[Windows-Patchlogs] {{ event_log_results | length }} Host(s): Critical, Warning und Error"
         report_body: "{{ lookup('ansible.builtin.template', 'windows-event-log-report.j2') }}"
       when: event_log_results | default([]) | length > 0
 

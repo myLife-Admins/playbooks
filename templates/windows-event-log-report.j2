@@ -1,26 +1,38 @@
-Windows-Patchereignisse - Uebersicht (UTC)
-
+{% set ns = namespace(lines=[]) %}
 {% for item in event_log_results %}
-{{ item.host }} ({{ item.start_utc }} bis {{ item.end_utc }} UTC)
+{% set header = '=====' ~ item.host %}
+{% set ns.lines = ns.lines + [header ~ ('=' * (86 - (header | length)))] %}
 {% if item.error | default('') | length > 0 %}
-  FEHLER: {{ item.error }}
+{% set ns.lines = ns.lines + ['  FEHLER: ' ~ item.error] %}
 {% else %}
-{% set ns = namespace(total=0) %}
+{% set ns.total = 0 %}
 {% for log_name, log_key in [('Application', 'application'), ('System', 'system')] %}
 {% set counts = item.logs[log_key] | default({}) %}
 {% set critical = counts.critical | default(0) | int %}
 {% set warning = counts.warning | default(0) | int %}
-  {{ log_name }}: {{ critical }} Critical, {{ warning }} Warning
-{% set ns.total = ns.total + critical + warning %}
+{% set error_count = counts.error | default(0) | int %}
+{% set ns.total = ns.total + critical + warning + error_count %}
+{% set ns.lines = ns.lines + ['  ' ~ log_name ~ ': ' ~ critical ~ ' Critical, ' ~ warning ~ ' Warning, ' ~ error_count ~ ' Error'] %}
 {% endfor %}
 {% if ns.total > 0 %}
-  PRUEFEN: {{ ns.total }} Ereignis(se). Details im Ereignisprotokoll des Hosts pruefen.
+{% set ns.lines = ns.lines + ['  PRUEFEN: ' ~ ns.total ~ ' Ereignis(se). Details im Ereignisprotokoll des Hosts pruefen.'] %}
 {% else %}
-  Keine kritischen Ereignisse oder Warnungen.
+{% set ns.lines = ns.lines + ['  Keine kritischen Ereignisse, Warnungen oder Fehler.'] %}
 {% endif %}
+{% for log_name, log_key in [('Application', 'application'), ('System', 'system')] %}
+{% set log_data = item.logs[log_key] | default({}) %}
+{% for event in log_data.events | default([]) %}
+{% if event.message | default('') | trim | length > 0 %}
+{% set ns.lines = ns.lines + ['', '- [' ~ event.level ~ '] ' ~ event.provider ~ ': ' ~ event.message] %}
+{% endif %}
+{% endfor %}
+{% endfor %}
 {% for error in item.logs.errors | default([]) %}
-  FEHLER beim Lesen: {{ error }}
+{% set ns.lines = ns.lines + ['  FEHLER beim Lesen: ' ~ error] %}
 {% endfor %}
 {% endif %}
-
+{% if not loop.last %}
+{% set ns.lines = ns.lines + [''] %}
+{% endif %}
 {% endfor %}
+{{ ns.lines | join('\n') }}
