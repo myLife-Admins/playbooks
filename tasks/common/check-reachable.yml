@@ -21,17 +21,24 @@
     timeout: "{{ reach_timeout | default(5) | int }}"
   delegate_to: localhost
   connection: local
+  become: false
   register: reach_check
   failed_when: false
 
-# Offline nur bei genau diesem Timeout. Scheitert der Check aus einem anderen
-# Grund, wird die Verbindung trotzdem versucht - ein echter Fehler zeigt sich
-# dann dort, statt einen erreichbaren Host stumm zu ueberspringen.
+# Timeout und eindeutige DNS-Aufloesungsfehler bedeuten offline. Andere
+# Fehler werden nicht verschluckt: die eigentliche Verbindung zeigt sie dann.
 - name: Erreichbarkeit merken
   ansible.builtin.set_fact:
-    host_offline: "{{ 'Timeout when waiting' in (reach_check.msg | default('')) }}"
+    host_offline: >-
+      {{ 'timeout when waiting' in (reach_check.msg | default('') | lower)
+         or 'name or service not known' in (reach_check.msg | default('') | lower)
+         or 'temporary failure in name resolution' in (reach_check.msg | default('') | lower)
+         or 'nodename nor servname' in (reach_check.msg | default('') | lower)
+         or 'no such host' in (reach_check.msg | default('') | lower)
+         or 'failed to resolve' in (reach_check.msg | default('') | lower)
+         or 'getaddrinfo' in (reach_check.msg | default('') | lower) }}
 
 - name: Offline melden
   ansible.builtin.debug:
-    msg: "offline - Port antwortet nicht (ausgeschaltet oder nicht im DNS)"
+    msg: "offline - Port antwortet nicht oder Hostname ist nicht im DNS"
   when: host_offline | bool

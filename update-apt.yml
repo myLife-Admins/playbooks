@@ -13,7 +13,7 @@
 - name: Test - APT Update
   hosts: "{{ target_hosts | default('all') }}"
   become: true
-  gather_facts: true
+  gather_facts: false
 
   vars:
     apt_dry_run: true
@@ -21,51 +21,64 @@
     # an, und der Text "false" ist fuer Ansible wahr.
 
   tasks:
-    - name: Nur Debian/Ubuntu behandeln
-      ansible.builtin.assert:
-        that: ansible_facts['os_family'] == 'Debian'
-        fail_msg: >-
-          {{ inventory_hostname }} ist kein Debian/Ubuntu
-          (os_family={{ ansible_facts['os_family'] }}) - APT passt hier nicht.
-        quiet: true
+    - name: Ausgangswert setzen
+      ansible.builtin.set_fact:
+        host_offline: false
 
-    - name: Verbindung und System melden
-      ansible.builtin.debug:
-        msg: >-
-          {{ inventory_hostname }} ({{ ansible_facts['distribution'] }}
-          {{ ansible_facts['distribution_version'] }}) erreicht,
-          become-User ist {{ ansible_facts['user_id'] }}
+    - name: Erreichbarkeit pruefen
+      ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/common/check-reachable.yml"
 
-    - name: Paketlisten aktualisieren
-      ansible.builtin.apt:
-        update_cache: true
+    - name: Debian/Ubuntu aktualisieren
+      when: not (host_offline | bool)
+      block:
+        - name: Fakten sammeln
+          ansible.builtin.setup:
 
-    - name: Anstehende Updates ermitteln (installiert nichts)
-      ansible.builtin.apt:
-        upgrade: dist
-      check_mode: true
-      register: apt_simulation
+        - name: Nur Debian/Ubuntu behandeln
+          ansible.builtin.assert:
+            that: ansible_facts['os_family'] == 'Debian'
+            fail_msg: >-
+              {{ inventory_hostname }} ist kein Debian/Ubuntu
+              (os_family={{ ansible_facts['os_family'] }}) - APT passt hier nicht.
+            quiet: true
 
-    - name: Anstehende Updates anzeigen
-      ansible.builtin.debug:
-        msg: >-
-          {{ apt_simulation.changed | ternary('Es stehen Updates an.',
-             'Keine Updates offen - System ist aktuell.') }}
+        - name: Verbindung und System melden
+          ansible.builtin.debug:
+            msg: >-
+              {{ inventory_hostname }} ({{ ansible_facts['distribution'] }}
+              {{ ansible_facts['distribution_version'] }}) erreicht,
+              become-User ist {{ ansible_facts['user_id'] }}
 
-    - name: Upgrade durchfuehren
-      ansible.builtin.apt:
-        upgrade: dist
-      when: not (apt_dry_run | bool)
+        - name: Paketlisten aktualisieren
+          ansible.builtin.apt:
+            update_cache: true
 
-    - name: Pruefen, ob ein Reboot noetig waere
-      ansible.builtin.stat:
-        path: /var/run/reboot-required
-      register: reboot_required_file
+        - name: Anstehende Updates ermitteln (installiert nichts)
+          ansible.builtin.apt:
+            upgrade: dist
+          check_mode: true
+          register: apt_simulation
 
-    - name: Ergebnis zusammenfassen
-      ansible.builtin.debug:
-        msg: >-
-          Modus: {{ (apt_dry_run | bool) | ternary('Simulation (nichts geaendert)',
-          'Upgrade ausgefuehrt') }} |
-          Reboot noetig: {{ reboot_required_file.stat.exists | ternary('ja', 'nein') }}
-          {{ (apt_dry_run | bool) | ternary('(Dieser Testlauf rebootet grundsaetzlich nicht.)', '') }}
+        - name: Anstehende Updates anzeigen
+          ansible.builtin.debug:
+            msg: >-
+              {{ apt_simulation.changed | ternary('Es stehen Updates an.',
+                 'Keine Updates offen - System ist aktuell.') }}
+
+        - name: Upgrade durchfuehren
+          ansible.builtin.apt:
+            upgrade: dist
+          when: not (apt_dry_run | bool)
+
+        - name: Pruefen, ob ein Reboot noetig waere
+          ansible.builtin.stat:
+            path: /var/run/reboot-required
+          register: reboot_required_file
+
+        - name: Ergebnis zusammenfassen
+          ansible.builtin.debug:
+            msg: >-
+              Modus: {{ (apt_dry_run | bool) | ternary('Simulation (nichts geaendert)',
+              'Upgrade ausgefuehrt') }} |
+              Reboot noetig: {{ reboot_required_file.stat.exists | ternary('ja', 'nein') }}
+              {{ (apt_dry_run | bool) | ternary('(Dieser Testlauf rebootet grundsaetzlich nicht.)', '') }}

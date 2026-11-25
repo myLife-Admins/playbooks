@@ -61,6 +61,7 @@ wurde mit Commit `clear` (1092d36) entfernt, der alte Stand liegt in
 | `9b847b7` … `bd3bfd8` | `update-winget.yml`: als SYSTEM, pro Paket statt `--all`, Mailbericht, Nachkontrolle |
 | `8da0746`, `c243fa0` | Offline-Hosts sind kein Fehler, Port-Check gegen den echten Host |
 | `0759709`, `1b64b32` | **Pins**: `pin list`, `winget_pin_ids` und die `pinning.db` **aller** Profile |
+| noch uncommittet | `update-winget-selected.yml`: gezielte winget-Updates nur per exakter ID |
 | `8942240` | `update-windows.yml` mit Patch-Protokoll; Bausteine nach `tasks/`, `templates/`, `vars/` ausgelagert |
 | `d2dfc91` | Snapshot über die vCenter-REST- und VI/JSON-API statt `vm_snapshot` (kein `pyvmomi` im Image) |
 | `cdbeba8`, `40c2e6c` | höchstens `winupd_snapshot_parallel` Snapshots gleichzeitig; Snapshot-Play nur über Hosts, die einen brauchen |
@@ -115,6 +116,9 @@ Windows-Programme über winget.
   `[GEPINNT] … (Pin von <user>)`.
 - Das Ziel: Jeder Entwickler setzt seine Pins selbst (`winget pin add`), und
   der Lauf respektiert sie.
+- `update-winget-selected.yml` importiert denselben Ablauf, begrenzt ihn aber
+  auf `winget_package_ids` (Komma oder Zeilenumbruch). Ein leerer Wert ist ein
+  Fehler; IDs ohne verfügbares Update werden gemeldet, nicht als Fehler gewertet.
 
 ### `update-windows.yml` (Windows-Server-Updates mit Protokoll)
 Für Server 2016 bis 2025. Einstellungen stehen in `vars/windows-update.yml`.
@@ -255,7 +259,7 @@ Jede Datei beschreibt im Kopf ihre Eingaben, Optionen und Ergebnisse.
 | Datei | Eingabe | Ergebnis |
 |---|---|---|
 | `common/remember-run-hosts.yml` | – | `report_hosts` auf localhost (für das Abschluss-Play) |
-| `common/check-reachable.yml` | optional `reach_timeout` (5) | `host_offline` (nur bei „Timeout when waiting“; Port 5985 für winrm/psrp, sonst 22) |
+| `common/check-reachable.yml` | optional `reach_timeout` (5) | `host_offline` bei Port-Timeout oder eindeutigem DNS-Aufloesungsfehler; Port 5985 fuer winrm/psrp, sonst 22 |
 | `common/send-report-mail.yml` | `report_subject`, `report_body`, optional `report_attach` | Mail, sofern `mail_to` gesetzt |
 | `common/fail-on-problems.yml` | `report_hosts`, `report_results[].problem` | Lauf wird **nach** der Mail rot |
 | `windows/host-info.yml` | – | `win_host_info` {os, version `Release.UBR`, free_gb, pending_reboot, now} |
@@ -294,7 +298,7 @@ Das ist die häufigste Fehlerquelle, deshalb hier ausführlich.
 | Art | Wo | Beispiele |
 |---|---|---|
 | Pro Host/Gruppe | **Inventory** (Semaphore) | `winupd_manual`, `winupd_reboot`, `vm_name`, `snapshot_required`, `winget_pin_ids`, `user_install_ignore`, `ansible_connection=winrm` |
-| Pro Lauf | **Survey** des Templates (Bool-Schalter als Enum, Aufbewahrung als Integer) | `winget_dry_run`, `apt_dry_run`, `winupd_dry_run`, `target_hosts`, `winupd_snapshot_parallel`, `winupd_snapshot_retention_hours` |
+| Pro Lauf | **Survey** des Templates (Bool-Schalter als Enum, Aufbewahrung als Integer) | `winget_dry_run`, `winget_package_ids` (nur `update-winget-selected.yml`), `apt_dry_run`, `winupd_dry_run`, `target_hosts`, `winupd_snapshot_parallel`, `winupd_snapshot_retention_hours` |
 | Zugangsdaten / Mail / vCenter | **Variablengruppe** (Environment), Passwörter als **Secret** | `mail_host`, `mail_to`, `mail_from`, `mail_cc`, `mail_bcc`, `mail_port`, `mail_secure`, `mail_username`, `mail_password`, `vm_user`, `vm_password`, `vcenter_hostname`, `vcenter_validate_certs` |
 | Feste Einstellungen eines Playbooks | `vars/<playbook>.yml` per `vars_files` | `winupd_min_free_gb`, `winupd_first`, `win_update_categories` |
 
@@ -352,8 +356,10 @@ Präzedenz, die man kennen muss:
   kein `winget` im PATH.
 
 ### Fehler und Berichte
-- **Offline ist kein Fehler.** `check-reachable.yml` setzt `host_offline`, und
-  der Host erscheint im Bericht in der Offline-Liste.
+- **Offline ist kein Fehler.** `check-reachable.yml` setzt `host_offline` bei
+  Port-Timeout oder eindeutigem DNS-Aufloesungsfehler, und der Host erscheint
+  im Bericht in der Offline-Liste. Andere Fehler werden nicht als offline
+  maskiert.
 - Probleme pro Host sammeln (`*_error`, `*_problem`). Erst schickt das
   Abschluss-Play die Mail, dann lässt `fail-on-problems.yml` den Lauf
   scheitern. Die Mail kommt also **immer**.

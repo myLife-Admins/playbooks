@@ -5,11 +5,12 @@ Patch-Playbooks für die monatlichen Serverupdates, betrieben über Semaphore.
 ## Stand dieses Branches
 
 `stable` enthält derzeit `update-apt.yml`, `update-winget.yml`,
-`update-windows.yml` und `pull-playbooks.yml`, dazu gemeinsame Bausteine unter
-`tasks/` und `templates/`. Der Commit `clear` (1092d36) hat
-den übrigen Bestand entfernt: `ansible.cfg`, `inventory/`, `requirements.yml`
-und beide Produktions-Playbooks samt `tasks/`. Verloren ist davon nichts, der
-Stand davor liegt in `482ad68` und lässt sich gezielt zurückholen:
+`update-winget-selected.yml`, `update-windows.yml` und `pull-playbooks.yml`,
+dazu gemeinsame Bausteine unter `tasks/` und `templates/`. Der Commit `clear`
+(1092d36) hat den übrigen Bestand entfernt: `ansible.cfg`, `inventory/`,
+`requirements.yml` und beide Produktions-Playbooks samt `tasks/`. Verloren ist
+davon nichts, der Stand davor liegt in `482ad68` und lässt sich gezielt
+zurückholen:
 
 ```bash
 git checkout 482ad68 -- ansible.cfg inventory playbooks
@@ -103,6 +104,10 @@ Ablauf: Debian/Ubuntu prüfen → Paketlisten aktualisieren → anstehende Updat
 per `check_mode` ermitteln → Upgrade (nur ohne dry run) →
 `/var/run/reboot-required` prüfen → Zusammenfassung.
 
+Vorher prüft ein kurzer Port- und DNS-Check die Erreichbarkeit. Hosts, die
+ausgeschaltet sind oder deren Name nicht aufgelöst werden kann, werden als
+offline übersprungen; sie brechen den Lauf nicht ab.
+
 Rebootet wird nie, auch nicht mit `apt_dry_run=false` — das unterscheidet es
 vom alten `playbooks/update-apt.yml`. Es benutzt ausschließlich
 `ansible.builtin.*` und braucht deshalb keine Collection aus Galaxy, was es
@@ -127,6 +132,23 @@ ansible-playbook update-winget.yml -e winget_dry_run=false
 
 Rebootet wird nie. Quelle ist nur das Community-Repository `winget` — die
 Store-Quelle braucht Store-Zugang und scheitert auf Servern.
+
+### `update-winget-selected.yml` — ausgewählte Programme per ID
+
+Aktualisiert nur die ausdrücklich angegebenen winget-IDs. In Semaphore die
+Survey-Variable `winget_package_ids` als Text anlegen; mehrere IDs mit Komma
+oder Zeilenumbruch trennen:
+
+```text
+7zip.7zip, Mozilla.Firefox
+```
+
+Leere Eingaben werden abgelehnt, damit der Lauf niemals versehentlich alle
+Programme aktualisiert. Standardmäßig bleibt `winget_dry_run` auf `true`;
+erst mit `winget_dry_run=false` wird installiert. Es gelten weiterhin die
+exakten IDs, der Pin-Schutz, die Ausführung als SYSTEM, die Nachkontrolle und
+der gemeinsame Mailbericht aus `update-winget.yml`. IDs ohne anstehendes Update
+erscheinen als `[KEIN UPDATE]` und werden nicht als Fehler gewertet.
 
 **Bericht pro Paket.** Statt `upgrade --all` holt das Playbook erst die Liste
 und aktualisiert dann jedes Paket einzeln mit `--id <id> --exact`. Das ergibt
@@ -187,14 +209,14 @@ winget_pin_ids=['7zip.7zip', 'Mozilla.Firefox']
 Exakte Ids wie in der Spalte „ID" von `winget upgrade`. Nicht als Play-Variable
 im Playbook setzen — die würde das Inventory überstimmen.
 
-**Offline-Hosts sind kein Fehler.** Vor winget prüft das Playbook kurz, ob der
-WinRM-Port antwortet (`winget_reach_timeout`, Standard 5 s, direkt aus dem
-Container). Wer nicht antwortet — ausgeschaltet, Notebook unterwegs, nicht mehr
-im DNS —, gilt als offline: kein Verbindungsfehler im Log, kein Problem, der
-Lauf wird davon nicht rot. In der Mail stehen diese Hosts gesammelt in einer
-Zeile am Ende, im Betreff als „N offline". Antwortet der Port, aber WinRM
-scheitert danach (falsches Passwort, Proxy statt Server), ist das weiterhin
-ein Problem.
+**Offline-Hosts sind kein Fehler.** Vor winget prüft das gemeinsame
+`check-reachable.yml` den WinRM-Port (Standard 5 s, direkt aus dem Container).
+Wer nicht antwortet oder nicht im DNS auflösbar ist — ausgeschaltet,
+Notebook unterwegs, nicht mehr im DNS —, gilt als offline: kein
+Verbindungsfehler im Log, kein Problem, der Lauf wird davon nicht rot. In der
+Mail stehen diese Hosts gesammelt in einer Zeile am Ende, im Betreff als „N
+offline". Antwortet der Port, aber WinRM scheitert danach (falsches Passwort,
+Proxy statt Server), ist das weiterhin ein Problem.
 
 Probleme brechen einen Host nicht ab, sondern werden gesammelt: ein
 fehlgeschlagenes Paket, ein WinRM-Fehler, fehlendes oder nicht startendes
@@ -682,7 +704,8 @@ jedem Start ab, mit einem voreingestellten Wert.
 
 | Variable | Typ | Werte | Standard | Template |
 |---|---|---|---|---|
-| `winget_dry_run` | Auswahl (enum) | `true`, `false` | `true` | `update-winget.yml` |
+| `winget_dry_run` | Auswahl (enum) | `true`, `false` | `true` | beide winget-Templates |
+| `winget_package_ids` | Text | winget-IDs, Komma oder Zeilenumbruch | — | `update-winget-selected.yml` |
 | `apt_dry_run` | Auswahl (enum) | `true`, `false` | `true` | `update-apt.yml` |
 | `target_hosts` | Auswahl (enum) | Gruppennamen aus dem Inventory | — | alle |
 
@@ -914,6 +937,7 @@ Im Branch:
 ```
 update-apt.yml                  Linux-Programme (apt), dry run als Standard
 update-winget.yml               Windows-Programme (winget), dry run als Standard
+update-winget-selected.yml      ausgewaehlte Programme nach exakter winget-ID
 update-windows.yml              Windows-Updates + Patch-Protokoll, dry run als Standard
 report-user-installs.yml        Benutzer-Installationen (--scope user) finden, nur lesen
 pull-playbooks.yml              git pull im Playbook-Ordner

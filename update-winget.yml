@@ -56,6 +56,18 @@
     - name: Hosts dieses Laufs merken
       ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/common/remember-run-hosts.yml"
 
+    - name: Paket-IDs fuer die gezielte Aktualisierung pruefen
+      ansible.builtin.assert:
+        that:
+          - winget_package_ids is defined
+          - winget_package_ids is string
+          - winget_package_ids | trim | length > 0
+        fail_msg: >-
+          winget_package_ids muss fuer update-winget-selected.yml mindestens
+          eine exakte Paket-ID enthalten (mehrere IDs mit Komma oder Zeilenumbruch trennen).
+        quiet: true
+      when: winget_selected_only | default(false) | bool
+
     - name: Ausgangswerte setzen
       ansible.builtin.set_fact:
         host_offline: false
@@ -78,6 +90,8 @@
           Source: "{{ winget_source }}"
           VerifySeconds: "{{ winget_verify_seconds | int }}"
           ExcludeIds: "{{ winget_pin_ids | default([]) | list }}"
+          SelectOnly: "{{ 'true' if winget_selected_only | default(false) | bool else 'false' }}"
+          TargetIds: "{{ winget_package_ids | default('') }}"
         script: |
           [CmdletBinding()]
           param (
@@ -85,13 +99,22 @@
               [string]$Mode,
               [string]$Source,
               [int]$VerifySeconds,
-              [string[]]$ExcludeIds = @()
+              [string[]]$ExcludeIds = @(),
+              [string]$SelectOnly = 'false',
+              [string]$TargetIds = ''
           )
           # Bewusst nicht 'Stop': PowerShell 5.1 bricht sonst bei der ersten
           # Zeile auf stderr eines externen Programms ab.
           $ErrorActionPreference = 'Continue'
           # Ohne Konsole (WinRM) kann das Setzen scheitern - dann eben ohne.
           try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
+
+          $selectedOnly = $SelectOnly -eq 'true'
+          $targetIds = @($TargetIds -split '[,\r\n]+' | ForEach-Object { $_.Trim() } |
+              Where-Object { $_ } | Select-Object -Unique)
+          if ($selectedOnly -and $targetIds.Count -eq 0) {
+              throw 'Fuer die gezielte Aktualisierung wurde keine Paket-ID uebergeben.'
+          }
 
           # Neueste installierte Version suchen. Der Ordnername enthaelt sie:
           # Microsoft.DesktopAppInstaller_<version>_x64__8wekyb3d8bbwe
@@ -196,11 +219,12 @@
               $ok = $l.Hex -in $listOkCodes
               $t = if ($ok) { ConvertFrom-WingetTable -Lines $l.Lines } else { $null }
               [pscustomobject]@{
-                  Ok    = $ok
-                  Hex   = $l.Hex
-                  Lines = $l.Lines
-                  Rows  = @(if ($t) { $t.Rows })
-                  Notes = @(if ($t) { $t.Notes })
+                  Ok     = $ok
+                  Hex    = $l.Hex
+                  Lines  = $l.Lines
+                  Parsed = [bool]($t -and $t.Parsed)
+                  Rows   = @(if ($t) { $t.Rows })
+                  Notes  = @(if ($t) { $t.Notes })
               }
           }
 
@@ -312,6 +336,23 @@
               }
           }
 
+          $notAvailable = @()
+          $canResolveTargets = $listing.Ok -and (
+              $listing.Parsed -or $listing.Hex -in @('0x8A150014', '0x8A15002B')
+          )
+          if ($selectedOnly -and $listing.Ok -and -not $canResolveTargets) {
+              $notes += 'winget-Update-Liste nicht sicher erkannt; ausgewaehlte IDs wurden nicht aktualisiert.'
+          }
+          if ($selectedOnly -and $canResolveTargets) {
+              $targetSet = @{}
+              foreach ($id in $targetIds) { $targetSet[$id] = $true }
+              $knownSet = @{}
+              foreach ($p in @($rows) + @($pinned)) { $knownSet[$p.id] = $true }
+              $notAvailable = @($targetIds | Where-Object { -not $knownSet.ContainsKey($_) })
+              $rows = @($rows | Where-Object { $targetSet.ContainsKey($_.id) })
+              $pinned = @($pinned | Where-Object { $targetSet.ContainsKey($_.id) })
+          }
+
           $packages = @(foreach ($row in $rows) {
               $entry = [ordered]@{
                   name      = $row.name
@@ -344,6 +385,18 @@
               }
               [pscustomobject]$entry
           })
+          foreach ($id in $notAvailable) {
+              $packages += [pscustomobject]@{
+                  name      = $id
+                  id        = $id
+                  version   = '-'
+                  available = '-'
+                  status    = 'kein Update'
+                  rc_hex    = $null
+                  hint      = 'nicht in der Update-Liste (aktuell, nicht installiert oder ID nicht gefunden)'
+                  output    = @()
+              }
+          }
 
           # Nachkontrolle: Manche Installer kehren sofort zurueck und
           # installieren im Hintergrund weiter. Deshalb erneut listen, bis die
@@ -382,6 +435,7 @@
               nicht_bestaetigt = Get-StatusCount 'nicht bestaetigt'
               fehlgeschlagen   = Get-StatusCount 'fehlgeschlagen'
               nicht_anwendbar  = Get-StatusCount 'nicht anwendbar'
+              kein_update      = Get-StatusCount 'kein Update'
               uebersprungen    = Get-StatusCount 'uebersprungen'
               gepinnt          = $pinned.Count
           }
@@ -392,17 +446,18 @@
               'nicht bestaetigt' = '[PRUEFEN]'
               'fehlgeschlagen'   = '[FEHLER]'
               'nicht anwendbar'  = '[N/A]'
+              'kein Update'      = '[KEIN UPDATE]'
               'uebersprungen'    = '[SKIP]'
           }
           $report = @()
           if ($Mode -eq 'list') {
-              $report += '{0} Update(s) anstehend, {1} gepinnt - nur gelistet, nichts installiert' -f `
-                  $packages.Count, $pinned.Count
+              $report += '{0} Update(s) anstehend, {1} ohne Update, {2} gepinnt - nur gelistet, nichts installiert' -f `
+                  $counts.anstehend, $counts.kein_update, $pinned.Count
           } else {
               $report += ('aktualisiert: {0} | nicht bestaetigt: {1} | fehlgeschlagen: {2} | ' +
-                          'nicht anwendbar: {3} | uebersprungen: {4} | gepinnt: {5}') -f `
+                          'nicht anwendbar: {3} | kein Update: {4} | uebersprungen: {5} | gepinnt: {6}') -f `
                   $counts.aktualisiert, $counts.nicht_bestaetigt, $counts.fehlgeschlagen,
-                  $counts.nicht_anwendbar, $counts.uebersprungen, $counts.gepinnt
+                  $counts.nicht_anwendbar, $counts.kein_update, $counts.uebersprungen, $counts.gepinnt
           }
           foreach ($p in $packages) {
               $line = '{0,-12} {1,-40} {2} -> {3}' -f $tags[$p.status], $p.id, $p.version, $p.available
@@ -536,6 +591,7 @@
           {%- set pending = counts | map(attribute='anstehend', default=0) | map('int') | sum -%}
           {%- set unconfirmed = counts | map(attribute='nicht_bestaetigt', default=0) | map('int') | sum -%}
           {%- set pinned = counts | map(attribute='gepinnt', default=0) | map('int') | sum -%}
+          {%- set no_update = counts | map(attribute='kein_update', default=0) | map('int') | sum -%}
           {%- set problems = results | selectattr('problem') | list | length -%}
           {%- set offline = results | selectattr('offline') | list | length -%}
           {%- set totals = [
@@ -543,6 +599,7 @@
                 ((unconfirmed ~ ' nicht bestaetigt') if unconfirmed else ''),
                 ((failed ~ ' fehlgeschlagen') if failed else ''),
                 ((pending ~ ' anstehend') if pending else ''),
+                ((no_update ~ ' ohne Update') if no_update else ''),
                 ((pinned ~ ' gepinnt') if pinned else ''),
                 ((offline ~ ' offline') if offline else '')
               ] | select | join(', ') -%}

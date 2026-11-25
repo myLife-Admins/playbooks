@@ -1,0 +1,22 @@
+---
+# Prueft die ID-Eingabe und startet danach den gemeinsamen winget-Ablauf.
+- name: Eingabe fuer gezielte winget-Aktualisierung pruefen
+  hosts: "{{ target_hosts | default('all') }}"
+  gather_facts: false
+  tasks:
+    - name: Paket-IDs verlangen
+      ansible.builtin.assert:
+        that:
+          - winget_package_ids is defined
+          - winget_package_ids is string
+          - winget_package_ids | trim | length > 0
+        fail_msg: >-
+          winget_package_ids muss mindestens eine exakte Paket-ID enthalten
+          (mehrere IDs mit Komma oder Zeilenumbruch trennen).
+        quiet: true
+
+    - name: Gezielten Modus fuer das gemeinsame Playbook merken
+      ansible.builtin.set_fact:
+        winget_selected_only: true
+
+- ansible.builtin.import_playbook: update-winget.yml
